@@ -1,0 +1,11 @@
+# Each person's own settings: never commit these
+SETUP.md
+atlassian-api.env
+
+# Design, plans and progress notes (they describe the author's own setup)
+.superpowers/
+
+# Python and macOS clutter
+__pycache__/
+*.pyc
+.DS_Store
