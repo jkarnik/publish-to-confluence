@@ -12,6 +12,9 @@ MIN_WORDS = 0.5
 MIN_CONTEXT = 0.7
 MARGIN = 0.15
 MIN_MOVE_WORDS = 3
+# Surroundings that already hold this many of the highlight's own words can't tell
+# look-alike passages apart (a deleted list item's sibling slides into its place).
+REPEAT_WORDS = 2
 # A moved run may not start or end on one of these (they may sit inside it).
 STOPWORDS = frozenset(
     "a an the of to in on at by for with and or but is are was were be it its this that as from".split()
@@ -124,11 +127,14 @@ def _runs_in_block(words: List[Tuple[str, int, int]], highlight: List[str],
                 elif row[j - 1] > above:
                     row[j] = row[j - 1]
                 diag = above
+            lcs = row[n]
+            extra = (last - first + 1) - lcs
+            if extra > max_extra:
+                break  # a longer run never has fewer extra words
             if run_word not in edge_words:
                 continue
-            lcs = row[n]
             score = lcs / n
-            if score >= MIN_WORDS and (last - first + 1) - lcs <= max_extra:
+            if score >= MIN_WORDS:
                 found.append((score, first, last))
     return found
 
@@ -157,6 +163,9 @@ def _find_moved(anchor: Anchor, texts: List[str]) -> Optional[Result]:
         return None
     highlight_set = frozenset(highlight)
     edge_words = highlight_set - STOPWORDS
+    around = {w.lower() for w in _WORD.findall(anchor.before + " " + anchor.after)}
+    if len(around & edge_words) >= REPEAT_WORDS:
+        return None
     highlight_count = Counter(highlight)
     candidates = []  # (score, block, start, end)
     for block, text in enumerate(texts):

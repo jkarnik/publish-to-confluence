@@ -282,6 +282,57 @@ class MovedMatchTests(unittest.TestCase):
         self.assertEqual(_span_text(texts, got), text)
 
 
+class SurroundingsGuardTests(unittest.TestCase):
+    def test_deleted_list_item_does_not_slide(self):
+        # Near-identical list items: delete one and the next item slides into its place,
+        # taking over its surroundings. The comment must detach, not move to a sibling.
+        items = [
+            "Alert when packet loss on the uplink interface exceeds 5%.",
+            "Alert when packet loss on the downlink interface exceeds 5%.",
+            "Alert when packet loss on the backup interface exceeds 5%.",
+        ]
+        texts = ["Alerting requirements"] + items + ["Out of scope"]
+        for gone in range(3):
+            name = ("uplink", "downlink", "backup")[gone]
+            text = "packet loss on the %s interface exceeds 5%%" % name
+            anchor = _anchor_for(texts, 1 + gone, text)
+            new_texts = texts[:1 + gone] + texts[2 + gone:]
+            got = matcher.find(anchor, new_texts, allow_move=True)
+            self.assertEqual(got, Result("none", reason="textGone"), name)
+
+    def test_repetitive_surroundings_block_move(self):
+        # The old surroundings already hold two of the highlight's words ("stopped",
+        # "syncing"), so they cannot tell this passage from a look-alike: detach.
+        block = "The agent stopped syncing and then " + NEW + TRAIL
+        texts = ["Weekly summary.", block, "Closing remarks."]
+        anchor = _anchor_for(texts, 1, NEW)
+        anchor = Anchor(OLD, anchor.before, anchor.after)
+        self.assertIn("stopped syncing", anchor.before)
+        got = matcher.find(anchor, texts, allow_move=True)
+        self.assertEqual(got, Result("none", reason="textGone"))
+
+    def test_one_repeated_word_in_surroundings_still_moves(self):
+        # Only one highlight word ("stopped") in the surroundings: below the guard.
+        block = "The agent stopped and then " + NEW + TRAIL
+        texts = ["Weekly summary.", block, "Closing remarks."]
+        anchor = _anchor_for(texts, 1, NEW)
+        anchor = Anchor(OLD, anchor.before, anchor.after)
+        self.assertIn("stopped", anchor.before)
+        got = matcher.find(anchor, texts, allow_move=True)
+        self.assertEqual(got.status, "moved")
+        self.assertEqual(_span_text(texts, got), NEW)
+
+    def test_stopwords_in_surroundings_do_not_count(self):
+        # "the" and "since" are highlight words; "the" is a stopword, so "the ... the" is
+        # one repeat at most and the guard does not fire.
+        block = "Since the agent restarted, the " + NEW + " and nobody noticed."
+        texts = ["Weekly summary.", block, "Closing remarks."]
+        anchor = _anchor_for(texts, 1, NEW)
+        anchor = Anchor(OLD, anchor.before, anchor.after)
+        got = matcher.find(anchor, texts, allow_move=True)
+        self.assertEqual(got.status, "moved")
+
+
 class SpeedTests(unittest.TestCase):
     def test_speed(self):
         rng = random.Random(20261119)
@@ -312,6 +363,51 @@ class SpeedTests(unittest.TestCase):
         for (anchor, block), got in zip(anchors, results):
             self.assertEqual((got.status, got.block), ("moved", block), anchor)
             self.assertIn("zzqx", texts[block][got.start:got.end])
+
+    def test_speed_long_highlight(self):
+        # A ~30-word highlight on a 5,000-word page of varied made-up sentences
+        # (about 30% stopwords, 100 blocks of 50 words), plus planted near-copies of the
+        # anchor's block so several blocks pass the word-overlap check.
+        rng = random.Random(20261120)
+        letters = "abcdefghijklmnoprstuvwz"
+        vocab = sorted({
+            "".join(rng.choice(letters) for _ in range(rng.randint(4, 9)))
+            for _ in range(1500)
+        } - set(matcher.STOPWORDS))
+        stops = sorted(matcher.STOPWORDS)
+
+        def sentence(count):
+            return " ".join(
+                rng.choice(stops) if rng.random() < 0.3 else rng.choice(vocab)
+                for _ in range(count)
+            )
+
+        texts = [sentence(50) for _ in range(100)]
+        self.assertEqual(sum(len(t.split()) for t in texts), 5000)
+        anchors = []  # (anchor, block it came from, block count at that time)
+        for block in range(0, 100, 10):
+            words = texts[block].split()
+            first = rng.randrange(0, 15)
+            span = words[first:first + 30]
+            old = " ".join(span)
+            anchors.append((_anchor_for(texts, block, old), block))
+            for index in (7, 22):  # reword two words in the middle
+                span[index] = "zzqx%d" % index
+            reworded = words[:first] + span + words[first + 30:]
+            texts[block] = " ".join(reworded)
+        # Near-copies: replace some other blocks with the first anchor's block, lightly changed.
+        original = texts[anchors[0][1]].split()
+        for other in (3, 33, 63):
+            copy = list(original)
+            for index in rng.sample(range(len(copy)), 6):
+                copy[index] = rng.choice(vocab)
+            texts[other] = " ".join(copy)
+        started = time.perf_counter()
+        results = [matcher.find(anchor, texts, allow_move=True) for anchor, _ in anchors]
+        elapsed = time.perf_counter() - started
+        self.assertLess(elapsed, 2.0)
+        for (anchor, block), got in list(zip(anchors, results))[1:]:
+            self.assertEqual((got.status, got.block), ("moved", block), anchor)
 
 
 if __name__ == "__main__":
