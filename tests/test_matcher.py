@@ -365,11 +365,12 @@ class AlignTests(unittest.TestCase):
     def test_align_repeated_identical_blocks_are_not_paired_early(self):
         # "No." is unique on the old side but occurs twice among the new blocks, so it
         # is not paired by identity, and by ratio the two new copies tie. The alert was
-        # deleted in one place and inserted, edited, in another: it pairs across the page.
+        # deleted in one place and inserted, edited, in another: blocks only pair inside
+        # one replaced region, so it stays unpaired too.
         old = ["Intro", "Yes.", "Alert when disk A is full.", "No.", "End"]
         new = ["Intro", "No.", "No.", "Alert when disk A is nearly full.", "Yes.", "End"]
         got = matcher.align(old, new)
-        self.assertEqual(got, [0, 4, 3, None, 5])
+        self.assertEqual(got, [0, 4, None, None, 5])
 
     def test_align_near_ties_stay_unpaired(self):
         # Delete "uplink" and rename "downlink" to "WAN": the renamed item is almost as
@@ -420,10 +421,11 @@ class AlignTests(unittest.TestCase):
     def test_align_deleted_block_is_a_rival_across_regions(self):
         # Delete uplink, move backup up and reword it: the deleted item (alone in its
         # replaced region with backup') loses to backup's own old block, which sits in a
-        # separate deleted region.
+        # separate deleted run. That old block may not pair from outside the region, so
+        # backup' stays unpaired too: moved and edited, its comments detach.
         old = _list_texts()
         new = [old[0], old[3].replace("exceeds", "goes above"), old[2], old[4]]
-        self.assertEqual(matcher.align(old, new), [0, None, 2, 1, 3])
+        self.assertEqual(matcher.align(old, new), [0, None, 2, None, 3])
 
     def test_align_rival_just_under_threshold_still_blocks(self):
         # A pair at 0.522 against a rival at 0.478: under MIN_PAIR_RATIO, but a near-tie.
@@ -555,16 +557,17 @@ class AlignedMatchTests(unittest.TestCase):
         start = new[3].index("restarted at noon")
         self.assertEqual(got, Result("exact", 3, start, start + len("restarted at noon")))
 
-    def test_moved_edited_paragraph_follows_its_block(self):
-        # Moved and lightly edited: it pairs with its old block across the page, so the
-        # comment follows it even though its sentence also occurs in another block.
+    def test_moved_edited_paragraph_with_repeated_text_is_ambiguous(self):
+        # Moved and lightly edited: the old block was deleted in one place and the edited
+        # copy inserted in another, which looks the same as deleting a passage and adding
+        # a look-alike, so they don't pair. The sentence occurs twice: the comment detaches.
         sentence = "The collector restarted at noon and nobody noticed."
         old = ["Intro", sentence, "Section B", "Other notes. " + sentence, "Closing"]
         new = ["Intro", "Section B", "Other notes. " + sentence, sentence + " It repeated.", "Closing"]
+        self.assertIsNone(matcher.align(old, new)[1])
         anchor = _anchor_for(old, 1, "restarted at noon")
         got = self.find(anchor, new, old, allow_move=False)
-        start = new[3].index("restarted at noon")
-        self.assertEqual(got, Result("exact", 3, start, start + len("restarted at noon")))
+        self.assertEqual(got, Result("none", reason="ambiguous"))
 
     def test_moved_rewritten_paragraph_with_repeated_text_is_ambiguous(self):
         # Moved and rewritten past recognition (ratio under 0.5): no pair, and the
@@ -769,6 +772,65 @@ class AlignedMatchTests(unittest.TestCase):
         for k, name in enumerate(NAMES):
             anchor = _anchor_for(old, 1 + k, "checks for the %s path alert when packet loss stays above 5%%" % name)
             self.assertEqual(self.find(anchor, new_texts, old), GONE, name)
+
+    def assert_comments_detach(self, old, new_texts, block, highlights):
+        """Every comment on old block `block` detaches, and the block itself is unpaired."""
+        self.assertIsNone(matcher.align(old, new_texts)[block])
+        for text in highlights:
+            got = self.find(_anchor_for(old, block, text), new_texts, old)
+            self.assertEqual(got.status, "none", (text, got))
+
+    UPLINK_HIGHLIGHTS = (
+        "Alert when packet loss on the uplink interface exceeds 5%",
+        "packet loss on the uplink interface exceeds 5%", "uplink interface exceeds 5%",
+        "interface exceeds 5%", "exceeds 5%", "packet loss on the uplink", "Alert when packet loss",
+    )
+    WIFI = "Alert when packet loss on the wifi interface exceeds 5%."
+
+    def test_deleted_item_with_lookalike_appended_detaches(self):
+        # A1: delete the uplink item and add a wifi item at the end of the same list.
+        old = _list_texts() + ["Alerting on jitter for voice traffic."]
+        new_texts = [old[0], old[2], old[3], self.WIFI, old[4], old[5]]
+        self.assert_comments_detach(old, new_texts, 1, self.UPLINK_HIGHLIGHTS)
+
+    def test_deleted_item_with_lookalike_inserted_mid_list_detaches(self):
+        # A5: delete the uplink item and add a wifi item between downlink and backup.
+        old = _list_texts() + ["Alerting on jitter for voice traffic."]
+        new_texts = [old[0], old[2], self.WIFI, old[3], old[4], old[5]]
+        self.assert_comments_detach(old, new_texts, 1, self.UPLINK_HIGHLIGHTS)
+
+    def test_deleted_story_with_new_story_appended_detaches(self):
+        # B1: user stories share a template, so a new story looks like the deleted one.
+        story = "As a network engineer, I want to %s so that I can %s."
+        stories = [story % ("see packet loss per interface", "find the failing link"),
+                   story % ("get alerted when BGP sessions flap", "react before users notice"),
+                   story % ("compare latency across regions", "spot a bad peering point")]
+        new_story = story % ("export flow records to a dashboard", "share them with the on-call team")
+        tail = ["Success metrics", "Reduce mean time to detect network incidents by 20% within two quarters.",
+                "Open questions", "Do we need to keep flow data for 30 days or 90 days?"]
+        old = ["User stories"] + stories + tail
+        new_texts = ["User stories", stories[1], stories[2], new_story] + tail
+        self.assert_comments_detach(old, new_texts, 1, (
+            "As a network engineer", "As a network engineer, I want to see packet loss per interface",
+            "see packet loss per interface", "so that I can find the failing link", "I want to see packet loss"))
+
+    def test_deleted_paragraph_with_lookalike_elsewhere_detaches(self):
+        # B4: the problem paragraph is deleted and a look-alike added under Non-goals.
+        # (Phrases found once in the old page and once in the new one, such as "network
+        # incidents take hours to triage", still follow by the unique-passage rule: an
+        # accepted limit, not asserted here.)
+        problem = ("Customers running hybrid networks cannot see packet loss between their branch offices"
+                   " and the cloud, so network incidents take hours to triage and are often blamed on"
+                   " the application team.")
+        lookalike = ("Customers running hybrid networks cannot see latency between their data centers"
+                     " and the cloud, so network incidents take hours to triage and are often escalated"
+                     " to the wrong team.")
+        rest = ["Today they stitch together polls, flow exports and synthetic checks by hand.", "Goals",
+                "Give one view of network health.", "Non-goals", "Replacing the existing on-call tooling."]
+        old = ["Problem", problem] + rest
+        new_texts = ["Problem"] + rest + [lookalike]
+        self.assert_comments_detach(old, new_texts, 1, (
+            "cannot see packet loss between their branch offices", "often blamed on the application team"))
 
     def test_genuine_reword_with_old_texts(self):
         # K7's reworded passage, now with the old page given.

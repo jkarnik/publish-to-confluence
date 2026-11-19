@@ -16,7 +16,7 @@ MIN_MOVE_WORDS = 3
 # Without the old page, surroundings that already hold this many of the highlight's own
 # words can't tell look-alike passages apart (a deleted list item's sibling slides in).
 REPEAT_WORDS = 2
-# Pairing the old and new blocks left unmatched anywhere on the page (see align).
+# Pairing old and new blocks left unmatched, by similarity (see align).
 MAX_PAIRS = 10000  # more unmatched old x new pairs than this: none of them is paired
 PAIR_MARGIN = 0.05  # a pair must beat every rival sharing a block with it by this much
 MIN_PAIR_RATIO = 0.5
@@ -281,11 +281,14 @@ def _best_other(top: List[Tuple[float, int]], other: int) -> float:
 
 
 def _pair_by_ratio(old_texts: List[str], texts: List[str], mapping: List[Optional[int]],
-                   taken: set) -> None:
-    """Pair the old and new blocks still unmatched anywhere on the page by difflib ratio.
+                   taken: set, region_of_old: dict, region_of_new: dict) -> None:
+    """Pair still-unmatched old and new blocks by difflib ratio, inside one replaced region.
 
-    Every unmatched old block is a rival for every unmatched new block, whether difflib
-    put it in the same replaced region, another one, or a deleted or inserted run.
+    Every unmatched old block on the page is a rival for every unmatched new block, whether
+    difflib put it in the same replaced region, another one, or a deleted or inserted run.
+    But a pair is only made when both blocks sit in the same replaced region (the region_of
+    maps): a block deleted in one place and a look-alike added in another can't be told
+    apart from one block moved and edited, so neither pairs and their comments detach.
     """
     olds = [i for i, new_block in enumerate(mapping) if new_block is None]
     news = [j for j in range(len(texts)) if j not in taken]
@@ -322,7 +325,8 @@ def _pair_by_ratio(old_texts: List[str], texts: List[str], mapping: List[Optiona
             top.sort(reverse=True)
             del top[2:]
     for (i, j), ratio in ratios.items():
-        if ratio < MIN_PAIR_RATIO:
+        region = region_of_old.get(i)
+        if ratio < MIN_PAIR_RATIO or region is None or region != region_of_new.get(j):
             continue
         rival = max(_best_other(top_of_old[i], j), _best_other(top_of_new[j], i))
         # Ties and near-ties stay unpaired. A pair that beats all its rivals by the margin
@@ -337,21 +341,27 @@ def align(old_texts: List[str], texts: List[str]) -> List[Optional[int]]:
 
     Unchanged blocks line up through difflib's opcodes. Among the rest, blocks whose text
     is identical and unique on both sides pair first. Then every still-unmatched old block
-    is compared with every still-unmatched new block on the page: a pair needs ratio >= 0.5
-    and has to beat every other pair sharing its old or its new block by PAIR_MARGIN, so
-    ties and near-ties stay unpaired. With more than MAX_PAIRS such pairs, none is scored
-    and none is paired. Deleted and unpaired old blocks map to None.
+    is compared with every still-unmatched new block on the page: a pair needs ratio >= 0.5,
+    has to beat every other pair sharing its old or its new block by PAIR_MARGIN (so ties
+    and near-ties stay unpaired), and both blocks must sit in the same replaced region.
+    With more than MAX_PAIRS such pairs, none is scored and none is paired. Deleted and
+    unpaired old blocks map to None.
     """
     mapping: List[Optional[int]] = [None] * len(old_texts)
     taken: set = set()
+    region_of_old: dict = {}  # block -> number of the replaced region (opcode) it sits in
+    region_of_new: dict = {}
     opcodes = difflib.SequenceMatcher(None, old_texts, texts, autojunk=False).get_opcodes()
-    for tag, i1, i2, j1, _ in opcodes:
+    for region, (tag, i1, i2, j1, j2) in enumerate(opcodes):
         if tag == "equal":
             for offset in range(i2 - i1):
                 mapping[i1 + offset] = j1 + offset
                 taken.add(j1 + offset)
+        elif tag == "replace":
+            region_of_old.update((i, region) for i in range(i1, i2))
+            region_of_new.update((j, region) for j in range(j1, j2))
     _pair_identical(old_texts, texts, mapping, taken)
-    _pair_by_ratio(old_texts, texts, mapping, taken)
+    _pair_by_ratio(old_texts, texts, mapping, taken, region_of_old, region_of_new)
     return mapping
 
 
