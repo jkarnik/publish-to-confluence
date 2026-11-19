@@ -1,5 +1,148 @@
-# Publish to Confluence
+# publish-to-confluence
 
-A Claude Code skill that publishes markdown files to Confluence and keeps each page up to date.
+## What it does
 
-Setup instructions are coming soon.
+publish-to-confluence is a Claude Code skill that publishes a markdown file as a Confluence page, then updates that same page each time you publish the file again. It uploads the images your file uses, and every web link in it shows on the page as a smart-link card. Reviewers' inline comments stay attached when you republish. If someone edited the page on Confluence since your last publish, you choose whether to merge their edits into your file or overwrite them.
+
+## What you need
+
+- Claude Code on a Mac.
+- The Atlassian MCP server, connected to Claude Code. The setup below adds it with Atlassian's `claude mcp add` command if it's missing, and you log in once through `/mcp`.
+- Python 3 and git. Both come with Apple's command line developer tools. If your Mac doesn't have them, ask Claude to run `xcode-select --install`, which opens Apple's installer.
+- A Confluence page or folder you can add pages to.
+- Optional: an Atlassian API token, for images, cards and keeping comments attached (see [The token file](#the-token-file)).
+
+## Set it up
+
+Paste this into Claude Code and answer its questions. Have your Confluence page or folder open in your browser, so you can copy its address from the address bar.
+
+```text
+Set up the publish-to-confluence skill for me. I'm not a developer, so run each step
+yourself and tell me in plain words what you did.
+
+1. If the folder "~/Code/Publish to Confluence" doesn't exist, clone
+   https://github.com/jkarnik/publish-to-confluence.git into it. If it already exists,
+   run git pull in it instead.
+2. Make "~/.claude/skills/publish-to-confluence" a symbolic link to that folder, so
+   Claude Code loads it as a personal skill. Create "~/.claude/skills" first if needed.
+3. Check whether an Atlassian MCP server is connected to Claude Code. If none is set
+   up, add one for all my projects:
+   claude mcp add --transport http --scope user atlassian https://mcp.atlassian.com/v2/mcp
+4. If the folder has no SETUP.md, copy SETUP.example.md to SETUP.md. If its Parent:
+   line still holds the placeholder, ask me for the address of the Confluence page or
+   folder my pages should go under, and put it after "Parent:".
+5. If the folder has no atlassian-api.env, tell me that an Atlassian API token lets the
+   skill upload images, turn links into cards and keep comments attached, and ask
+   whether I want to set one up now. If I do:
+   - copy atlassian-api.env.example to atlassian-api.env and make it readable only
+     by me (chmod 600)
+   - ask for my Atlassian email and put it after ATLASSIAN_EMAIL=
+   - tell me to open https://id.atlassian.com/manage-profile/security/api-tokens,
+     select "Create API token" (not the one with scopes) and copy the token
+   - open atlassian-api.env in TextEdit, so I can paste the token after
+     ATLASSIAN_API_TOKEN= and save
+   Never ask me to paste the token into this chat, and never show the file's contents.
+6. Tell me to restart Claude Code, then type /mcp and log in to Atlassian if it isn't
+   logged in yet.
+```
+
+When Claude says it's done, restart Claude Code. If Atlassian isn't logged in yet, type `/mcp`, select the Atlassian server, press Enter and choose "Authenticate".
+
+### Set it up by hand
+
+Run these in Terminal. They do the same as the prompt.
+
+1. Get the files. If you already have the folder, run `git -C "$HOME/Code/Publish to Confluence" pull` instead.
+
+   ```sh
+   git clone https://github.com/jkarnik/publish-to-confluence.git "$HOME/Code/Publish to Confluence"
+   ```
+
+2. Link the folder as a personal skill:
+
+   ```sh
+   mkdir -p "$HOME/.claude/skills"
+   ln -sfn "$HOME/Code/Publish to Confluence" "$HOME/.claude/skills/publish-to-confluence"
+   ```
+
+3. Run `claude mcp list`. If it lists no Atlassian server, add one:
+
+   ```sh
+   claude mcp add --transport http --scope user atlassian https://mcp.atlassian.com/v2/mcp
+   ```
+
+4. Make your SETUP.md. When it opens in TextEdit, paste your page or folder address after `Parent:` and save.
+
+   ```sh
+   cp -n "$HOME/Code/Publish to Confluence/SETUP.example.md" "$HOME/Code/Publish to Confluence/SETUP.md"
+   open -e "$HOME/Code/Publish to Confluence/SETUP.md"
+   ```
+
+5. Optional: make the token file and fill it in as [The token file](#the-token-file) describes.
+
+   ```sh
+   cp -n "$HOME/Code/Publish to Confluence/atlassian-api.env.example" "$HOME/Code/Publish to Confluence/atlassian-api.env"
+   chmod 600 "$HOME/Code/Publish to Confluence/atlassian-api.env"
+   open -e "$HOME/Code/Publish to Confluence/atlassian-api.env"
+   ```
+
+6. Restart Claude Code, and log in to Atlassian through `/mcp` as described after the prompt.
+
+## Publish a document
+
+In Claude Code, type the command with the path to your markdown file:
+
+```text
+/publish-to-confluence path/to/file.md
+```
+
+The first publish creates a new page inside the page or folder from your SETUP.md, and later publishes of that file update the same page. The page title comes from the file's first `#` heading.
+
+## The token file
+
+An Atlassian API token lets the skill upload your images, turn links into cards and keep reviewers' comments attached when you republish. The skill reads it from `atlassian-api.env` in the skill folder, which the setup makes from `atlassian-api.env.example`, readable only by you. Git ignores this file, so it can't end up in the repo.
+
+To create a token:
+
+1. Open https://id.atlassian.com/manage-profile/security/api-tokens, the API tokens page under Security in your Atlassian account settings. Atlassian may email you a one-time code to confirm it's you.
+2. Select "Create API token", not "Create API token with scopes". A token with scopes works only through api.atlassian.com, and the skill uses your own site's address.
+3. Give it a name, pick an expiry date (a year at most) and select "Create".
+4. Select "Copy to clipboard". Atlassian won't show the token again.
+5. Fill in both lines of `atlassian-api.env`, your Atlassian login email and the token, without spaces or quotes:
+
+   ```text
+   ATLASSIAN_EMAIL=you@example.com
+   ATLASSIAN_API_TOKEN=your-token
+   ```
+
+Without a working token, your text still publishes through the Atlassian MCP server, but the skill asks before every publish and says what that publish will lose. A page that already has images or cards from an earlier publish can't be republished without the token. <!-- probe: P3 -->
+
+Uploading images also needs permission to add attachments in the page's space.
+
+## Good to know
+
+- Before each republish, the skill checks the page for edits made on Confluence since your last publish. It shows any it finds section by section, then asks whether to merge them into your file, overwrite them with your file, or stop.
+- A merge shows exactly how your file will change and waits for your yes. It keeps a copy of your old file.
+- To keep your own words on a link instead of a card, add "plain" after the address: `[the epic](https://example.atlassian.net/browse/ABC-123 "plain")`. Write "block" there for a bigger card, or "embed" for an embedded view. When you merge, a card look someone set on Confluence comes back into your file the same way. <!-- probe: P5 -->
+- Comments move with text you reword, as long as the passage is still recognizable. A comment on one or two words stays only while those exact words are there. Comments on text you delete come loose, and the skill asks before publishing.
+- Comments stay attached when their highlighted words include bold text, code or a link. <!-- probe: P1 --> A comment on a link's words stays on the card that replaces them. <!-- probe: P4 --> Resolved comments stay attached too, and the skill doesn't ask about them. <!-- probe: P2 -->
+- Each publish adds up to three versions to the page history: one for your text and up to two minor ones for images, cards and comments.
+- Mermaid diagrams show as code.
+
+## Updating
+
+Ask Claude to update the publish-to-confluence skill, or run `git pull` in the folder:
+
+```sh
+git -C "$HOME/Code/Publish to Confluence" pull
+```
+
+## Troubleshooting
+
+| What you see | What to do |
+|---|---|
+| The skill says the token was rejected (401) | The token expired, was revoked or was mistyped. Create a new one and replace the `ATLASSIAN_API_TOKEN=` line in `atlassian-api.env`. |
+| An image upload fails with a 403 | You don't have permission to add attachments in that space. Ask a space admin for it. |
+| Claude can't reach Confluence | The Atlassian MCP server isn't connected, or needs you to log in again. Type `/mcp` and log in to the Atlassian server. If `/mcp` doesn't list one, add it as in step 3 of [Set it up by hand](#set-it-up-by-hand). |
+| The skill says your organization blocks API tokens | Your text still publishes through the MCP server, and the skill asks before each publish, as it does without a token. |
+| You want your old file back after a merge | It's in `~/.claude/publish-to-confluence/backups/`, named after your file plus the date and time (UTC) of the merge. |
