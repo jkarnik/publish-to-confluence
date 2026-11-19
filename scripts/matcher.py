@@ -9,9 +9,13 @@ from typing import List, Optional, Tuple
 
 CONTEXT = 32
 MIN_WORDS = 0.5
-MIN_CONTEXT = 0.6
+MIN_CONTEXT = 0.7
 MARGIN = 0.15
 MIN_MOVE_WORDS = 3
+# A moved run may not start or end on one of these (they may sit inside it).
+STOPWORDS = frozenset(
+    "a an the of to in on at by for with and or but is are was were be it its this that as from".split()
+)
 
 
 @dataclass(frozen=True)
@@ -94,17 +98,18 @@ def _words(text: str) -> List[Tuple[str, int, int]]:
 
 
 def _runs_in_block(words: List[Tuple[str, int, int]], highlight: List[str],
-                   highlight_set: frozenset) -> List[Tuple[float, int, int]]:
+                   edge_words: frozenset) -> List[Tuple[float, int, int]]:
     """(word score, first word index, last word index) for each run that qualifies.
 
-    A run starts and ends on a word from the highlight, holds at most twice the
-    highlight's word count, scores LCS / highlight words >= MIN_WORDS, and has no more
-    extra words (run length - LCS) than the highlight has words.
+    A run starts and ends on a highlight word that is not a stopword (edge_words), holds
+    at most twice the highlight's word count, scores LCS / highlight words >= MIN_WORDS,
+    and has at most max(2, n // 2) extra words (run length - LCS).
     """
     n = len(highlight)
+    max_extra = max(2, n // 2)
     found = []
     for first, (word, _, _) in enumerate(words):
-        if word not in highlight_set:
+        if word not in edge_words:
             continue
         # row[j] = LCS(highlight[:j], the run so far), extended one run word at a time,
         # so every end for this start costs one row instead of a fresh table.
@@ -119,11 +124,11 @@ def _runs_in_block(words: List[Tuple[str, int, int]], highlight: List[str],
                 elif row[j - 1] > above:
                     row[j] = row[j - 1]
                 diag = above
-            if run_word not in highlight_set:
+            if run_word not in edge_words:
                 continue
             lcs = row[n]
             score = lcs / n
-            if score >= MIN_WORDS and (last - first + 1) - lcs <= n:
+            if score >= MIN_WORDS and (last - first + 1) - lcs <= max_extra:
                 found.append((score, first, last))
     return found
 
@@ -151,6 +156,7 @@ def _find_moved(anchor: Anchor, texts: List[str]) -> Optional[Result]:
     if n < MIN_MOVE_WORDS:
         return None
     highlight_set = frozenset(highlight)
+    edge_words = highlight_set - STOPWORDS
     highlight_count = Counter(highlight)
     candidates = []  # (score, block, start, end)
     for block, text in enumerate(texts):
@@ -159,7 +165,7 @@ def _find_moved(anchor: Anchor, texts: List[str]) -> Optional[Result]:
         shared = sum(min(count, highlight_count[w]) for w, count in in_block.items())
         if shared < MIN_WORDS * n:  # LCS can't exceed the shared words
             continue
-        for word_score, first, last in _runs_in_block(words, highlight, highlight_set):
+        for word_score, first, last in _runs_in_block(words, highlight, edge_words):
             start, end = words[first][1], words[last][2]
             before, after = context_of(texts, block, start, end)
             if _context_upper_bound(anchor, before, after) < MIN_CONTEXT:

@@ -160,12 +160,43 @@ class MovedMatchTests(unittest.TestCase):
         self.assertEqual(got, Result("none", reason="textGone"))
 
     def test_four_of_seven_words_moves(self):
-        # Same as above with one more word kept (4/7 is over MIN_WORDS), so the
-        # word threshold is what stopped the test above.
-        texts = ["Weekly summary.", LEAD + "stopped syncing since the week" + TRAIL, "Closing remarks."]
+        # Four of the seven highlight words (4/7 is over MIN_WORDS), starting and ending
+        # on words that are not stopwords, so the word threshold is the only thing in play.
+        text = "stopped syncing since shift"
+        texts = ["Weekly summary.", LEAD + text + TRAIL, "Closing remarks."]
         got = matcher.find(self.anchor, texts, allow_move=True)
         self.assertEqual(got.status, "moved")
-        self.assertEqual(_span_text(texts, got), "stopped syncing since the")
+        self.assertEqual(_span_text(texts, got), text)
+
+    def test_partial_run_ending_on_stopword_detaches(self):
+        # 4 of 7 words, no extra words, surroundings intact: the same strength as the case
+        # above, but the run would end on "the", so it must not anchor a comment.
+        texts = ["Weekly summary.", LEAD + "stopped syncing since the week" + TRAIL, "Closing remarks."]
+        got = matcher.find(self.anchor, texts, allow_move=True)
+        self.assertEqual(got, Result("none", reason="textGone"))
+        # Seven unrelated words before that "the" make it worse, not better.
+        filler = " ".join(["quietly", "overnight"][i % 2] for i in range(7))
+        text = "stopped syncing since " + filler + " the early shift started"
+        texts = ["Weekly summary.", LEAD + text + TRAIL, "Closing remarks."]
+        got = matcher.find(self.anchor, texts, allow_move=True)
+        self.assertEqual(got, Result("none", reason="textGone"))
+
+    def test_run_starting_on_stopword_starts_on_next_word(self):
+        # The highlight starts with "the"; the new text has "the" too, but the span
+        # must begin on the first non-stopword highlight word.
+        old = ["Weekly summary.", LEAD + "the agent stopped syncing since monday" + TRAIL, "Closing remarks."]
+        anchor = _anchor_for(old, 1, "the agent stopped syncing since monday")
+        new = ["Weekly summary.", LEAD + "the agent stopped quietly syncing since monday" + TRAIL, "Closing remarks."]
+        got = matcher.find(anchor, new, allow_move=True)
+        self.assertEqual(got.status, "moved")
+        self.assertEqual(_span_text(new, got), "agent stopped quietly syncing since monday")
+
+    def test_small_insertion_still_moves(self):
+        text = "stopped syncing again since the early morning shift started"  # 2 extra words, n = 7
+        texts = ["Weekly summary.", LEAD + text + TRAIL, "Closing remarks."]
+        got = matcher.find(self.anchor, texts, allow_move=True)
+        start = texts[1].index(text)
+        self.assertEqual(got, Result("moved", 1, start, start + len(text)))
 
     def test_exactly_half_words_moves(self):
         old = ["Weekly summary.", LEAD + "stopped syncing since monday" + TRAIL, "Closing remarks."]
@@ -186,21 +217,42 @@ class MovedMatchTests(unittest.TestCase):
         self.assertEqual(got, Result("none", reason="textGone"))
 
     def test_too_many_extra_words(self):
-        # Six of the seven highlight words survive. Seven unrelated words inside the run
-        # is allowed (no more extra words than the highlight's seven words); eight is not.
-        # The run is 13 or 14 words, within twice the highlight's length either way.
+        # Six of seven highlight words survive. With n = 7 a run may hold at most
+        # max(2, 7 // 2) = 3 extra words: 3 moves, 4 detaches.
         def run(extra_count):
             filler = " ".join(["quietly", "overnight"][i % 2] for i in range(extra_count))
             text = "stopped syncing since " + filler + " the shift started"
             return ["Weekly summary.", LEAD + text + TRAIL, "Closing remarks."], text
 
-        texts, text = run(7)
+        texts, text = run(3)
         got = matcher.find(self.anchor, texts, allow_move=True)
         self.assertEqual(got.status, "moved")
         self.assertEqual(_span_text(texts, got), text)
-        texts, _ = run(8)
+        texts, _ = run(4)
         got = matcher.find(self.anchor, texts, allow_move=True)
         self.assertEqual(got, Result("none", reason="textGone"))
+
+    def test_too_many_extra_words_detaches(self):
+        # Every highlight word is still there, but spread over a 14-word run (7 extra words),
+        # which used to pass; the run is far looser than the wording it replaces.
+        filler = " ".join(["quietly", "overnight"][i % 2] for i in range(7))
+        text = "stopped syncing since " + filler + " the morning shift started"
+        texts = ["Weekly summary.", LEAD + text + TRAIL, "Closing remarks."]
+        got = matcher.find(self.anchor, texts, allow_move=True)
+        self.assertEqual(got, Result("none", reason="textGone"))
+
+    def test_few_extra_words_allowed_for_short_highlights(self):
+        # n = 3 still allows max(2, 3 // 2) = 2 extra words, not 1: the whole new wording is the span.
+        old = ["Weekly summary.", LEAD + "stopped syncing since" + TRAIL, "Closing remarks."]
+        anchor = _anchor_for(old, 1, "stopped syncing since")
+        text = "stopped quietly syncing overnight since"
+        new = ["Weekly summary.", LEAD + text + TRAIL, "Closing remarks."]
+        got = matcher.find(anchor, new, allow_move=True)
+        self.assertEqual(got.status, "moved")
+        self.assertEqual(_span_text(new, got), text)
+
+    def test_context_needs_seventy_percent(self):
+        self.assertEqual(matcher.MIN_CONTEXT, 0.7)
 
     def test_moved_two_equal_candidates(self):
         block = LEAD + NEW + TRAIL
@@ -209,7 +261,8 @@ class MovedMatchTests(unittest.TestCase):
         self.assertEqual(got, Result("none", reason="ambiguous"))
 
     def test_moved_clear_winner_over_weaker_candidate(self):
-        weaker = "Totally unrelated lead-in words, so " + NEW + " with other trailing remarks."
+        # Surroundings that still pass MIN_CONTEXT (about 0.74) but fit worse than the intact ones.
+        weaker = "The agent restarted around noon, then " + NEW + " and nobody saw it until Monday."
         texts = [weaker, "Weekly summary.", LEAD + NEW + TRAIL, "Closing remarks."]
         got = matcher.find(self.anchor, texts, allow_move=True)
         start = texts[2].index(NEW)
