@@ -89,11 +89,12 @@ Step 5 sends a republish here when the page's version is higher than the entry's
 
 ### Compare with the file
 
-Check each change in the diffs against the file by its words, not its formatting: the export shows a card as `<URL>`, for example.
+Find each change's passage in the file by its words, since the export writes some things its own way, such as a card as `<URL>`. Then check it against the file:
 
 - The file has the after side: it already has the change, which doesn't count.
 - The file still has the before side: the change is missing from the file.
 - The file has neither: the file changed the same passage since the last publish too. That's a clash.
+- A change whose before and after have the same words is a formatting edit, such as bold, a heading level, a list, a panel or a status label's colour. The file has it only if it has that formatting too, written its own way (a panel as a blockquote, for example); otherwise it's missing.
 - A card look the file would produce anyway doesn't count either: an inline card on a link the file has, or a Jira issue the file links by the same key. Compare the key in `/browse/ABC-123`, since the page may show the issue's address on a different host.
 - When unsure whether the file has a change, count it as missing.
 - If nothing is missing and nothing clashes, say in one line that the page was edited on Confluence but the file already has those edits, and carry on with step 6.
@@ -102,7 +103,7 @@ Check each change in the diffs against the file by its words, not its formatting
 
 Ask one question with three answers: merge, overwrite or stop.
 
-- List by section what was added, deleted or changed, each with a short snippet (before → after for a change), and list rich items by kind: card, embedded view, Jira issue or list, image, mention, status label or panel. Say which changes the file already has, and which passages the file changed too.
+- List by section what was added, deleted or changed, each with a short snippet (before → after for a change, or what a formatting edit did, such as "made bold"), and list rich items by kind: card, embedded view, Jira issue or list, image, mention, status label or panel. Say which changes the file already has, and which passages the file changed too.
 - Say how many edits there were and who made them.
 - The overwrite answer says that the page will match the file and that the Confluence edits stay in the page history. It also gives the losses step 6 would ask about, worked out as step 6 does, so this one answer covers them.
 
