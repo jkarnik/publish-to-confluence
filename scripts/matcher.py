@@ -20,7 +20,7 @@ REPEAT_WORDS = 2
 MAX_PAIRS = 10000  # more old x new pairs than this: pair by position, if the counts match
 PAIR_MARGIN = 0.05  # a pair must beat every rival sharing a block with it by this much
 MIN_PAIR_RATIO = 0.5
-CHAR_RATIO_LIMIT = 300  # blocks up to this many characters each compare by character
+CHAR_RATIO_LIMIT = 150  # blocks up to this many characters each compare by character
 # A moved run may not start or end on one of these (they may sit inside it).
 STOPWORDS = frozenset(
     "a an the of to in on at by for with and or but is are was were be it its this that as from".split()

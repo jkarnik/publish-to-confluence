@@ -398,8 +398,9 @@ class AlignTests(unittest.TestCase):
         self.assertIsNone(got[5])
         self.assertEqual(got[:5] + got[6:], list(range(5)) + list(range(6, 12)))
 
-    def test_align_blocks_up_to_300_characters_compare_by_character(self):
-        base = "word " * 60  # exactly 300 characters
+    def test_align_blocks_up_to_150_characters_compare_by_character(self):
+        base = "word " * 30  # exactly 150 characters
+        self.assertEqual(len(base), matcher.CHAR_RATIO_LIMIT)
         kinds = []
         real = matcher.difflib.SequenceMatcher
 
@@ -409,8 +410,27 @@ class AlignTests(unittest.TestCase):
 
         with mock.patch.object(matcher.difflib, "SequenceMatcher", spy):
             matcher._pair_ratio(base, base[:-1] + "x")
-            matcher._pair_ratio(base + "x", base)  # 301 characters on one side
+            matcher._pair_ratio(base + "x", base)  # 151 characters on one side
         self.assertEqual(kinds, [str, tuple])
+
+    def test_align_whole_page_rewrite_is_fast(self):
+        # Every one of 99 blocks of about 300 characters is lightly edited, so the whole
+        # page is one replaced region (9,801 pairs, under MAX_PAIRS).
+        rng = random.Random(20261121)
+        vocab = ["alpha", "beta", "gamma", "delta", "packet", "loss", "uplink", "agent",
+                 "syncing", "shift", "queue", "metric", "alert", "probe", "route", "disk"]
+        old = [" ".join(rng.choice(vocab) for _ in range(50)) for _ in range(99)]
+        self.assertGreater(min(len(block) for block in old), 250)
+        new = []
+        for block in old:
+            words = block.split()
+            words[25] = "zzqx"
+            new.append(" ".join(words))
+        started = time.perf_counter()
+        got = matcher.align(old, new)
+        elapsed = time.perf_counter() - started
+        self.assertLess(elapsed, 2.0)
+        self.assertEqual(got, list(range(99)))
 
 
 class AlignedMatchTests(unittest.TestCase):
