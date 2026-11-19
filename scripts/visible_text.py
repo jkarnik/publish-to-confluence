@@ -4,7 +4,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import FrozenSet, List
 
-from storage import tokenize
+from storage import Token, tokenize
 from textnorm import normalize_map
 
 
@@ -19,6 +19,19 @@ BLOCK_TAGS: FrozenSet[str] = frozenset({
     "p", "h1", "h2", "h3", "h4", "h5", "h6", "li", "td", "th", "blockquote", "pre",
     "div", "tr", "table", "ul", "ol", "caption", "ac:task-body", "ac:layout-cell",
 })
+
+
+# Elements a reader never sees as text: everything from the start tag to its matching end tag is skipped.
+HIDDEN_TAGS: FrozenSet[str] = frozenset({
+    "ac:structured-macro", "ac:plain-text-body", "ac:parameter", "pre", "ac:image",
+    "ac:task-id", "ac:task-status", "time", "ac:emoticon",
+})
+
+
+def _is_hidden(token: Token) -> bool:
+    if token.name in HIDDEN_TAGS or token.name.startswith("ri:"):
+        return True
+    return token.name == "a" and "data-card-appearance" in token.attrs  # a smart-link card
 
 
 def blocks(body: str) -> List[Block]:
@@ -40,9 +53,23 @@ def blocks(body: str) -> List[Block]:
                 ))
         del raw[:], raw_starts[:], raw_ends[:]
 
+    hidden_name = ""  # name of the hidden element being skipped ("" when none)
+    hidden_depth = 0  # how many of that name are open
+
     for token in tokenize(body):
+        if hidden_name:  # inside a hidden element: only look for its matching end
+            if token.name == hidden_name and token.kind == "start":
+                hidden_depth += 1
+            elif token.name == hidden_name and token.kind == "end":
+                hidden_depth -= 1
+                if hidden_depth == 0:
+                    hidden_name = ""
+            continue
         if token.kind in ("start", "end", "empty") and token.name in BLOCK_TAGS:
-            close()
+            close()  # <pre> is a block tag too, so it ends the block before it is skipped below
+        if token.kind in ("start", "empty") and _is_hidden(token):
+            if token.kind == "start":
+                hidden_name, hidden_depth = token.name, 1
         elif token.kind in ("start", "empty") and token.name == "br":
             raw.append(" ")  # one synthetic space that stands for the whole tag
             raw_starts.append(token.start)
