@@ -102,6 +102,22 @@ class RequestBasicsTests(unittest.TestCase):
         self.assertEqual(header(request, "Accept"), "application/json")
         self.assertEqual(opener.timeouts, [120])
 
+    def test_credentials_are_not_copied_onto_a_redirect(self):
+        client, opener = make({}, {"results": [{"title": "a.png", "_links": {"download": "/d"}}]}, b"x")
+        client.current_user()
+        client.download("7", "a.png")
+        self.assertEqual(len(opener.requests), 3)
+        handler = urllib.request.HTTPRedirectHandler()
+        for request in opener.requests:
+            with self.subTest(url=request.full_url):
+                self.assertEqual(header(request, "Authorization"), "Basic " + CREDENTIALS)
+                self.assertNotIn("Authorization", request.headers)
+                self.assertIn("Authorization", request.unredirected_hdrs)
+                followed = handler.redirect_request(
+                    request, None, 302, "Found", {}, "https://media.example.com/file")
+                self.assertIsNone(header(followed, "Authorization"))
+                self.assertEqual(header(followed, "Accept"), header(request, "Accept"))
+
     def test_opener_defaults_to_urlopen(self):
         fake = Opener({"ok": True})
         with mock.patch.object(urllib.request, "urlopen", fake):

@@ -77,7 +77,9 @@ class RestClient:
         any failure, where status 0 means no usable reply came back."""
         request = urllib.request.Request(
             self.site + path, data=data, method=method,
-            headers={"Authorization": self._auth, "Accept": accept, **(headers or {})})
+            headers={"Accept": accept, **(headers or {})})
+        # Unredirected, so urllib does not copy the credentials onto a redirect to another host.
+        request.add_unredirected_header("Authorization", self._auth)
         try:
             with self._opener(request, timeout=TIMEOUT) as response:
                 status, body = response.status, response.read()
