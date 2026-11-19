@@ -8,7 +8,7 @@ publish-to-confluence is a Claude Code skill that publishes a markdown file as a
 
 - Claude Code on a Mac.
 - The Atlassian MCP server, connected to Claude Code. MCP is the standard way Claude Code connects to other apps, and Atlassian's MCP server lets it read and edit Confluence pages with your Atlassian account. The setup below adds the server if it's missing, and you log in once through `/mcp`.
-- Python 3 and git. Both come with Apple's command line developer tools. If Claude says git or Python 3 is missing, ask it to run `xcode-select --install`, which opens Apple's installer.
+- Python 3 and git. Both come with Apple's command line developer tools. If Claude says git or Python 3 is missing, ask it to run `xcode-select --install`, which opens Apple's installer. When the install finishes, paste the [setup prompt](#set-it-up) again.
 - A Confluence page or folder you can add pages to.
 - Optional: an Atlassian API token, for images, cards and keeping comments attached (see [The token file](#the-token-file)).
 
@@ -73,7 +73,7 @@ Run these in Terminal. They do the same as the prompt.
    claude mcp add --transport http --scope user atlassian "https://mcp.atlassian.com/v2/mcp?tools=all"
    ```
 
-   The `?tools=all` ending makes the server offer all its tools, including the page history and comment tools the skill uses. If the list shows the server with an address that doesn't end that way, run `claude mcp remove` followed by the server's name, then the command above.
+   The `?tools=all` ending makes the server offer all its tools, including the page history and comment tools the skill uses. If the list shows the server with an address that doesn't end that way, run `claude mcp remove atlassian` (with the name the list shows, if it isn't `atlassian`), then the command above.
 
 4. Make your SETUP.md. When it opens in TextEdit, replace the text in parentheses after `Parent:` with your page or folder address, so the line reads like `Parent: https://example.atlassian.net/wiki/spaces/ABC/pages/123456/Product+notes`, and save.
 
@@ -119,7 +119,7 @@ To create a token:
    ATLASSIAN_API_TOKEN=your-token
    ```
 
-Without a working token, your text still publishes through the Atlassian MCP server, but the skill asks before every publish and says what that publish will lose. A page that holds images, or Jira issues shown through Confluence's Jira macro instead of as cards, can't be republished without the token; the skill says so before changing anything. A page with cards from an earlier publish still republishes, and its cards turn back into plain links.
+Without a working token, your text still publishes through the Atlassian MCP server, but the skill asks before every publish and says what that publish will lose. A page can't be republished without the token if it holds images, or if someone added an info panel or any other panel, an expand section, an excerpt, a table of contents, or a Jira issue or Jira list with Confluence's Jira macro. The skill says so before changing anything. A page with cards from an earlier publish still republishes, and its cards turn back into plain links.
 
 Uploading images also needs permission to add attachments in the page's space.
 
@@ -127,10 +127,12 @@ Uploading images also needs permission to add attachments in the page's space.
 
 - Before each republish, the skill checks the page for edits made on Confluence since your last publish. It shows any it finds section by section, then asks whether to merge them into your file, overwrite them with your file, or stop.
 - A merge shows exactly how your file will change and waits for your yes. It keeps a copy of your old file.
-- To keep your own words on a link instead of a card, add "plain" after the address: `[the epic](https://example.atlassian.net/browse/ABC-123 "plain")`. Write "block" there for a bigger card, or "embed" for an embedded view. If someone switches a card to a bigger card or an embedded view on Confluence, a merge writes "block" or "embed" after that link's address in your file, so later publishes keep that look. Without a working token, links stay plain whatever you write there, and the word shows when someone hovers over the link.
-- With a working token, comments move with text you reword, as long as the passage is still recognizable. A comment on one or two words stays only while those exact words are there. A comment comes loose when its text is deleted, reworded past recognition, or matches more than one place, so the skill can't tell where it belongs. The skill asks before any publish that would do that, so no open comment comes loose without a question.
-- Comments stay attached when their highlighted words include bold text, code or a link. A comment on a link's words stays on the card that replaces them. Resolved comments re-attach too while their text is still there, and the skill never asks about them.
-- Each publish adds a few minor versions to the page history.
+- With a working token, the skill turns panels, Jira macros and the like that someone added on Confluence into plain content before republishing, since Confluence won't take the update otherwise. A merge brings their content into your file: a panel as a quote, an expand section or an excerpt as its content, a Jira issue as a link that becomes a card, and a Jira list as a line like `Jira list: project = ABC`. It leaves out a table of contents, and the merge preview names each one.
+- To keep your own words on a link instead of a card, add "plain" after the address: `[the epic](https://example.atlassian.net/browse/ABC-123 "plain")`. Write "block" there for a bigger card, or "embed" for an embedded view. If someone changes a link's look on Confluence, a merge writes the matching word after that link's address in your file ("plain", "block", "embed", or "embed wide" for a wide embedded view), so later publishes keep that look. Without a working token, links stay plain whatever you write there, and the word shows when someone hovers over the link.
+- With a working token, when you reword the text a comment highlights, the comment moves with it, as long as the text is still recognizable. A comment on one or two words stays only while those exact words are there. A comment comes loose when the text it highlights is deleted, reworded past recognition, or matches more than one place, so the skill can't tell where it belongs. The skill asks before any publish that would do that.
+- When you edit several look-alike list items or table rows in one publish, a comment on one of them may come loose instead of moving with the text it highlights (the skill asks first).
+- Comments stay attached when the text they highlight has bold words, code or a link in it. A comment on a link's words stays on the card that replaces them. Resolved comments stay attached too while the text they highlight is still there, and the skill never asks about them.
+- Each publish adds one version for your text to the page history, plus up to two minor versions for the skill's own changes, such as images, cards and comments.
 - Mermaid diagrams show as code.
 
 ## Updating
@@ -148,5 +150,5 @@ git -C "$HOME/Code/Publish to Confluence" pull
 | The skill says the token was rejected (401) | The token expired, was revoked or was mistyped. Create a new token as [The token file](#the-token-file) describes, then ask Claude to open `~/Code/Publish to Confluence/atlassian-api.env` in TextEdit. Replace the old token after `ATLASSIAN_API_TOKEN=` with the new one and save. Never paste it into the chat. |
 | An image upload fails with a 403 | You don't have permission to add attachments in that space. Ask a space admin for it. |
 | Claude can't reach Confluence | The Atlassian MCP server isn't connected, or needs you to log in again. Type `/mcp`, select the Atlassian MCP server and log in. If `/mcp` doesn't list it, paste the [setup prompt](#set-it-up) again; it adds the server and keeps your settings. |
-| The skill says your organization blocks API tokens | Your text still publishes through the Atlassian MCP server, with the limits [The token file](#the-token-file) describes, and the skill asks before each publish. To get images, cards and comment protection, ask your Atlassian admin whether API tokens can be allowed for you. |
+| The skill says your organization blocks API tokens | Your text still publishes through the Atlassian MCP server, with the limits [The token file](#the-token-file) describes, and the skill asks before each publish. For images, cards and keeping comments attached, ask your Atlassian admin whether API tokens can be allowed for you. |
 | You want your old file back after a merge | It's in `~/.claude/publish-to-confluence/backups/`, named after your file plus the date and time (UTC) of the merge. Finder hides that folder, so ask Claude to open it, or press Shift-Command-G in Finder and paste the folder's path. |
