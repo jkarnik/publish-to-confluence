@@ -98,19 +98,22 @@ def make_cards(body: str, links: List[LinkRef]) -> Tuple[str, Dict[str, int]]:
             continue
         start = tokens[first]
         href = start.attrs.get("href", "").strip()
-        if not _WEB.match(href) or CARD_ATTRS[0] in start.attrs:
+        if not _WEB.match(href):
             continue
         if any(token.name in _IMAGE_ELEMENTS for token in tokens[first + 1:last]):
             continue
         if _in_code(tokens, first):
             continue
+        # From here the link is one the file wrote, so it uses up the next LinkRef for its URL, even
+        # when it is left as it is below (already a card, or a comment marker that crosses it). That
+        # keeps a second run over a body that already holds cards in step with the first.
+        queue = pending.get(_same_url(href))
+        tag = queue.popleft().tag if queue else None
         markers = _marker_tags(body, tokens, first, last)
-        if markers is None:
+        if markers is None or CARD_ATTRS[0] in start.attrs:
             continue
         done_until = last
 
-        queue = pending.get(_same_url(href))
-        tag = queue.popleft().tag if queue else None
         raw = body[start.start:start.end]
         opening = storage.set_attr(raw, "title", None) if _is_tag_word(start.attrs.get("title")) else raw
 

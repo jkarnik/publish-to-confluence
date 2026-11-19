@@ -171,6 +171,25 @@ class MakeCardsTests(unittest.TestCase):
         self.assertEqual(twice, once)
         self.assertEqual(got, counts())
 
+    def test_second_run_is_stable_with_duplicate_urls(self):
+        url = "https://example.com/u"
+        body = '<p><a href="%s">A</a> and <a href="%s" title="plain">B</a></p>' % (url, url)
+        links = [LinkRef(url, "A", None), LinkRef(url, "B", "plain")]
+        once, got_once = cards.make_cards(body, links)
+        self.assertEqual(once, '<p>' + card(url) + ' and <a href="%s">B</a></p>' % url)
+        self.assertEqual(got_once, counts(made=1, plain=1))
+        twice, got_twice = cards.make_cards(once, links)
+        self.assertEqual(twice, once)
+        self.assertEqual(got_twice, counts(plain=1))
+
+    def test_existing_card_uses_up_its_link_ref(self):
+        url = "https://example.com/u"
+        body = '<p>' + card(url, "block") + ' <a href="%s">B</a></p>' % url
+        links = [LinkRef(url, "A", "block"), LinkRef(url, "B", None)]
+        out, got = cards.make_cards(body, links)
+        self.assertEqual(out, '<p>' + card(url, "block") + ' ' + card(url) + '</p>')
+        self.assertEqual(got, counts(made=1))
+
     def test_escaping(self):
         body = '<p><a href="https://example.com/q?a=1&amp;b=2">words</a></p>'
         out, _ = cards.make_cards(body, [])
@@ -269,6 +288,15 @@ class MarkerTests(unittest.TestCase):
         body = ('<p><a href="%s">one <ac:inline-comment-marker ac:ref="R1">two</a> three'
                 '</ac:inline-comment-marker></p>' % self.URL)
         self.assertEqual(cards.make_cards(body, []), (body, counts()))
+
+    def test_unbalanced_marker_link_keeps_order(self):
+        broken = ('<a href="%s">one <ac:inline-comment-marker ac:ref="R1">two</a> three'
+                  '</ac:inline-comment-marker>' % self.URL)
+        body = '<p>' + broken + ' <a href="%s">B</a></p>' % self.URL
+        links = [LinkRef(self.URL, "A", "block"), LinkRef(self.URL, "B", None)]
+        out, got = cards.make_cards(body, links)
+        self.assertEqual(out, '<p>' + broken + ' ' + card(self.URL) + '</p>')
+        self.assertEqual(got, counts(made=1))
 
 
 class JiraMacroTests(unittest.TestCase):
