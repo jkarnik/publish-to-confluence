@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import difflib
+import re
+from collections import Counter
 from dataclasses import dataclass
 from typing import List, Optional, Tuple
 
@@ -83,13 +85,100 @@ def _pick_exact(anchor: Anchor, texts: List[str], spans: List[Tuple[int, int, in
     return Result("none", reason="ambiguous")
 
 
+_WORD = re.compile(r"\w+")
+
+
+def _words(text: str) -> List[Tuple[str, int, int]]:
+    """(lowercased word, start, end) for each word in text."""
+    return [(m.group().lower(), m.start(), m.end()) for m in _WORD.finditer(text)]
+
+
+def _runs_in_block(words: List[Tuple[str, int, int]], highlight: List[str],
+                   highlight_set: frozenset) -> List[Tuple[float, int, int]]:
+    """(word score, first word index, last word index) for each run that qualifies.
+
+    A run starts and ends on a word from the highlight, holds at most twice the
+    highlight's word count, scores LCS / highlight words >= MIN_WORDS, and has no more
+    extra words (run length - LCS) than the highlight has words.
+    """
+    n = len(highlight)
+    found = []
+    for first, (word, _, _) in enumerate(words):
+        if word not in highlight_set:
+            continue
+        # row[j] = LCS(highlight[:j], the run so far), extended one run word at a time,
+        # so every end for this start costs one row instead of a fresh table.
+        row = [0] * (n + 1)
+        for last in range(first, min(len(words), first + 2 * n)):
+            run_word = words[last][0]
+            diag, row[0] = 0, 0
+            for j in range(1, n + 1):
+                above = row[j]
+                if highlight[j - 1] == run_word:
+                    row[j] = diag + 1
+                elif row[j - 1] > above:
+                    row[j] = row[j - 1]
+                diag = above
+            if run_word not in highlight_set:
+                continue
+            lcs = row[n]
+            score = lcs / n
+            if score >= MIN_WORDS and (last - first + 1) - lcs <= n:
+                found.append((score, first, last))
+    return found
+
+
+def _context_upper_bound(anchor: Anchor, before: str, after: str) -> float:
+    """Like _context_score but with difflib's cheap upper bounds, so hopeless runs skip the full ratio."""
+    bounds = []
+    if anchor.before:
+        bounds.append(difflib.SequenceMatcher(None, anchor.before, before).quick_ratio())
+    if anchor.after:
+        bounds.append(difflib.SequenceMatcher(None, anchor.after, after).quick_ratio())
+    return sum(bounds) / len(bounds) if bounds else 0.0
+
+
 def _find_moved(anchor: Anchor, texts: List[str]) -> Optional[Result]:
-    """K7b: match the highlight after the text was reworded. Not written yet.
+    """Match the highlight after its passage was reworded.
 
     Returns a Result("moved", ...), Result("none", reason="ambiguous"), or None when
-    nothing qualifies. Until K7b fills this in it always returns None.
+    nothing qualifies (the caller reports textGone).
     """
-    return None
+    if not (anchor.before or anchor.after):
+        return None
+    highlight = [w.lower() for w in _WORD.findall(anchor.text)]
+    n = len(highlight)
+    if n < MIN_MOVE_WORDS:
+        return None
+    highlight_set = frozenset(highlight)
+    highlight_count = Counter(highlight)
+    candidates = []  # (score, block, start, end)
+    for block, text in enumerate(texts):
+        words = _words(text)
+        in_block = Counter(w for w, _, _ in words if w in highlight_set)
+        shared = sum(min(count, highlight_count[w]) for w, count in in_block.items())
+        if shared < MIN_WORDS * n:  # LCS can't exceed the shared words
+            continue
+        for word_score, first, last in _runs_in_block(words, highlight, highlight_set):
+            start, end = words[first][1], words[last][2]
+            before, after = context_of(texts, block, start, end)
+            if _context_upper_bound(anchor, before, after) < MIN_CONTEXT:
+                continue
+            context_score = _context_score(anchor, before, after)
+            if context_score >= MIN_CONTEXT:
+                candidates.append((word_score + context_score, block, start, end))
+    if not candidates:
+        return None
+    ranked = sorted(candidates, key=lambda c: (-c[0], c[1], c[2], c[3]))
+    best_score, block, start, end = ranked[0]
+    for score, other_block, other_start, other_end in ranked[1:]:
+        overlaps = other_block == block and other_start < end and start < other_end
+        if overlaps:
+            continue
+        if best_score - score < MARGIN:
+            return Result("none", reason="ambiguous")
+        break
+    return Result("moved", block, start, end)
 
 
 def find(anchor: Anchor, texts: List[str], allow_move: bool) -> Result:
