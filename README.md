@@ -100,7 +100,7 @@ The first publish creates a new page inside the page or folder from your SETUP.m
 
 ## The token file
 
-An Atlassian API token lets the skill upload your images, turn links into cards and keep reviewers' comments attached when you republish. The skill reads it from `atlassian-api.env` in the skill folder, which the setup makes from `atlassian-api.env.example`, readable only by you. Git ignores this file, so it can't end up in the repo.
+An Atlassian API token lets the skill upload your images, turn links into cards and keep reviewers' comments attached when you republish. The skill reads it from `atlassian-api.env` in `~/Code/Publish to Confluence`, which the setup makes from `atlassian-api.env.example`, readable only by you. Git ignores this file, so it can't end up in the repo.
 
 To create a token:
 
@@ -126,7 +126,7 @@ Uploading images also needs permission to add attachments in the page's space.
 - To keep your own words on a link instead of a card, add "plain" after the address: `[the epic](https://example.atlassian.net/browse/ABC-123 "plain")`. Write "block" there for a bigger card, or "embed" for an embedded view. When you merge, a card look someone set on Confluence comes back into your file the same way. <!-- probe: P5 -->
 - Comments move with text you reword, as long as the passage is still recognizable. A comment on one or two words stays only while those exact words are there. Comments on text you delete come loose, and the skill asks before publishing.
 - Comments stay attached when their highlighted words include bold text, code or a link. <!-- probe: P1 --> A comment on a link's words stays on the card that replaces them. <!-- probe: P4 --> Resolved comments stay attached too, and the skill doesn't ask about them. <!-- probe: P2 -->
-- Each publish adds up to three versions to the page history: one for your text and up to two minor ones for images, cards and comments.
+- Each publish adds a few minor versions to the page history.
 - Mermaid diagrams show as code.
 
 ## Updating
@@ -141,8 +141,8 @@ git -C "$HOME/Code/Publish to Confluence" pull
 
 | What you see | What to do |
 |---|---|
-| The skill says the token was rejected (401) | The token expired, was revoked or was mistyped. Create a new one and replace the `ATLASSIAN_API_TOKEN=` line in `atlassian-api.env`. |
+| The skill says the token was rejected (401) | The token expired, was revoked or was mistyped. Create a new token as [The token file](#the-token-file) describes, then ask Claude to open `~/Code/Publish to Confluence/atlassian-api.env` in TextEdit. Paste the token after `ATLASSIAN_API_TOKEN=` and save. Never paste it into the chat. |
 | An image upload fails with a 403 | You don't have permission to add attachments in that space. Ask a space admin for it. |
-| Claude can't reach Confluence | The Atlassian MCP server isn't connected, or needs you to log in again. Type `/mcp` and log in to the Atlassian server. If `/mcp` doesn't list one, add it as in step 3 of [Set it up by hand](#set-it-up-by-hand). |
+| Claude can't reach Confluence | The Atlassian MCP server isn't connected, or needs you to log in again. Type `/mcp` and log in to the Atlassian server. If `/mcp` doesn't list one, paste the [setup prompt](#set-it-up) again; it adds the server and keeps your settings. |
 | The skill says your organization blocks API tokens | Your text still publishes through the MCP server, and the skill asks before each publish, as it does without a token. |
 | You want your old file back after a merge | It's in `~/.claude/publish-to-confluence/backups/`, named after your file plus the date and time (UTC) of the merge. |
