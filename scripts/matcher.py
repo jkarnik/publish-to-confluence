@@ -5,6 +5,7 @@ import difflib
 import re
 from collections import Counter
 from dataclasses import dataclass
+from functools import lru_cache
 from typing import List, Optional, Tuple
 
 CONTEXT = 32
@@ -12,9 +13,6 @@ MIN_WORDS = 0.5
 MIN_CONTEXT = 0.7
 MARGIN = 0.15
 MIN_MOVE_WORDS = 3
-# Surroundings that already hold this many of the highlight's own words can't tell
-# look-alike passages apart (a deleted list item's sibling slides into its place).
-REPEAT_WORDS = 2
 # A moved run may not start or end on one of these (they may sit inside it).
 STOPWORDS = frozenset(
     "a an the of to in on at by for with and or but is are was were be it its this that as from".split()
@@ -26,6 +24,7 @@ class Anchor:
     text: str  # all normalized
     before: str = ""
     after: str = ""
+    block: int = -1  # index of the anchor's block in the OLD page's blocks; -1 = unknown
 
 
 @dataclass(frozen=True)
@@ -149,8 +148,8 @@ def _context_upper_bound(anchor: Anchor, before: str, after: str) -> float:
     return sum(bounds) / len(bounds) if bounds else 0.0
 
 
-def _find_moved(anchor: Anchor, texts: List[str]) -> Optional[Result]:
-    """Match the highlight after its passage was reworded.
+def _find_moved(anchor: Anchor, texts: List[str], only_block: Optional[int] = None) -> Optional[Result]:
+    """Match the highlight after its passage was reworded, in only_block if given.
 
     Returns a Result("moved", ...), Result("none", reason="ambiguous"), or None when
     nothing qualifies (the caller reports textGone).
@@ -163,13 +162,11 @@ def _find_moved(anchor: Anchor, texts: List[str]) -> Optional[Result]:
         return None
     highlight_set = frozenset(highlight)
     edge_words = highlight_set - STOPWORDS
-    around = {w.lower() for w in _WORD.findall(anchor.before + " " + anchor.after)}
-    if len(around & edge_words) >= REPEAT_WORDS:
-        return None
     highlight_count = Counter(highlight)
     candidates = []  # (score, block, start, end)
-    for block, text in enumerate(texts):
-        words = _words(text)
+    blocks = range(len(texts)) if only_block is None else [only_block]
+    for block in blocks:
+        words = _words(texts[block])
         in_block = Counter(w for w, _, _ in words if w in highlight_set)
         shared = sum(min(count, highlight_count[w]) for w, count in in_block.items())
         if shared < MIN_WORDS * n:  # LCS can't exceed the shared words
@@ -196,14 +193,106 @@ def _find_moved(anchor: Anchor, texts: List[str]) -> Optional[Result]:
     return Result("moved", block, start, end)
 
 
-def find(anchor: Anchor, texts: List[str], allow_move: bool) -> Result:
+_MAX_REPLACE_PAIRS = 10000
+_MIN_PAIR_RATIO = 0.5
+_CHAR_PRODUCT_LIMIT = 5000  # len(old) * len(new) up to this: compare characters
+
+
+@lru_cache(maxsize=4096)
+def _tokens(text: str) -> Tuple[str, ...]:
+    return tuple(w.lower() for w in _WORD.findall(text))
+
+
+def _pair_ratio(old: str, new: str) -> float:
+    """difflib ratio of two blocks, or 0.0 when a cheap upper bound already rules out the pair.
+
+    Short blocks are compared character by character. Long ones are compared word by
+    word: character ratios cost about a millisecond per 300-character pair, which adds up
+    to seconds over a big replaced region. autojunk is off because, with it on, difflib
+    treats common characters as junk once a block passes 200 characters and the ratio of
+    a lightly reworded paragraph collapses.
+    """
+    first, second = old, new
+    if len(old) * len(new) > _CHAR_PRODUCT_LIMIT:
+        words_old, words_new = _tokens(old), _tokens(new)
+        if words_old and words_new:
+            first, second = words_old, words_new
+    sequence = difflib.SequenceMatcher(None, first, second, autojunk=False)
+    if sequence.real_quick_ratio() < _MIN_PAIR_RATIO or sequence.quick_ratio() < _MIN_PAIR_RATIO:
+        return 0.0
+    return sequence.ratio()
+
+
+def align(old_texts: List[str], texts: List[str]) -> List[Optional[int]]:
+    """For each old block, the index of the new block that replaced it, or None.
+
+    Unchanged blocks line up through difflib's opcodes. Inside a replaced region, old and
+    new blocks pair greedily by descending difflib ratio (each new block once, a pair
+    only at ratio >= 0.5). A region over 10,000 pairs pairs by position instead, still
+    only at ratio >= 0.5. Deleted and unpaired old blocks map to None.
+    """
+    mapping: List[Optional[int]] = [None] * len(old_texts)
+    opcodes = difflib.SequenceMatcher(None, old_texts, texts, autojunk=False).get_opcodes()
+    for tag, i1, i2, j1, j2 in opcodes:
+        if tag == "equal":
+            for offset in range(i2 - i1):
+                mapping[i1 + offset] = j1 + offset
+        elif tag == "replace":
+            if (i2 - i1) * (j2 - j1) > _MAX_REPLACE_PAIRS:
+                pairs = [(_pair_ratio(old_texts[i1 + k], texts[j1 + k]), i1 + k, j1 + k)
+                         for k in range(min(i2 - i1, j2 - j1))]
+            else:
+                pairs = [(_pair_ratio(old_texts[i], texts[j]), i, j)
+                         for i in range(i1, i2) for j in range(j1, j2)]
+            pairs = [pair for pair in pairs if pair[0] >= _MIN_PAIR_RATIO]
+            pairs.sort(key=lambda pair: (-pair[0], pair[1], pair[2]))
+            used = set()
+            for _, i, j in pairs:
+                if mapping[i] is None and j not in used:
+                    mapping[i] = j
+                    used.add(j)
+    return mapping
+
+
+def _pick_exact_aligned(anchor: Anchor, texts: List[str], old_texts: List[str],
+                        spans: List[Tuple[int, int, int]], target: Optional[int]) -> Result:
+    """Exact matches when the old page is known: stay in the block that replaced the anchor's own."""
+    in_target = [span for span in spans if span[0] == target]
+    if in_target:
+        return _pick_exact(anchor, texts, in_target)
+    # Not in its own block: only a passage that is unique both before and after has moved.
+    if len(spans) == 1 and len(_exact_spans(anchor.text, old_texts)) == 1:
+        block, start, end = spans[0]
+        return Result("exact", block, start, end)
+    return Result("none", reason="ambiguous")
+
+
+def find(anchor: Anchor, texts: List[str], allow_move: bool,
+         old_texts: Optional[List[str]] = None,
+         alignment: Optional[List[Optional[int]]] = None) -> Result:
+    """Find the anchor in texts.
+
+    Given old_texts (the page the comment was made on) and anchor.block >= 0, matches stay
+    inside the block that replaced the anchor's own block, so a comment can't slide onto a
+    look-alike sibling when its own passage is deleted. alignment (from align) is computed
+    from old_texts when not passed. Without old_texts or a block, every block is searched.
+    """
     if not anchor.text:
         return Result("none", reason="textGone")
+    aligned = old_texts is not None and anchor.block >= 0
+    target: Optional[int] = None
+    if aligned:
+        if alignment is None:
+            alignment = align(old_texts, texts)
+        if anchor.block < len(alignment):
+            target = alignment[anchor.block]
     spans = _exact_spans(anchor.text, texts)
     if spans:
+        if aligned:
+            return _pick_exact_aligned(anchor, texts, old_texts, spans, target)
         return _pick_exact(anchor, texts, spans)
-    if allow_move:
-        moved = _find_moved(anchor, texts)
+    if allow_move and (target is not None or not aligned):
+        moved = _find_moved(anchor, texts, target)
         if moved is not None:
             return moved
     return Result("none", reason="textGone")

@@ -99,7 +99,7 @@ def _anchor_for(texts, block, text, **kw):
     """An Anchor for `text` as it sits in texts[block], with context from context_of."""
     start = texts[block].index(text)
     before, after = matcher.context_of(texts, block, start, start + len(text))
-    return Anchor(text, before, after, **kw) if kw else Anchor(text, before, after)
+    return Anchor(text, before, after, block=block, **kw)
 
 
 def _span_text(texts, got):
@@ -282,55 +282,170 @@ class MovedMatchTests(unittest.TestCase):
         self.assertEqual(_span_text(texts, got), text)
 
 
-class SurroundingsGuardTests(unittest.TestCase):
+ITEMS = [
+    "Alert when packet loss on the uplink interface exceeds 5%.",
+    "Alert when packet loss on the downlink interface exceeds 5%.",
+    "Alert when packet loss on the backup interface exceeds 5%.",
+]
+NAMES = ("uplink", "downlink", "backup")
+GONE = Result("none", reason="textGone")
+
+
+def _list_texts(items=ITEMS):
+    return ["Alerting requirements"] + list(items) + ["Out of scope"]
+
+
+class AlignTests(unittest.TestCase):
+    def test_align_equal_and_delete(self):
+        self.assertEqual(matcher.align(["a", "b"], ["a", "b"]), [0, 1])
+        self.assertEqual(matcher.align(["a", "b", "c"], ["a", "c"]), [0, None, 1])
+        self.assertEqual(matcher.align(["a", "b", "c"], ["a", "b", "c", "d"]), [0, 1, 2])
+        self.assertEqual(matcher.align([], ["a"]), [])
+        self.assertEqual(matcher.align(["a"], []), [None])
+
+    def test_align_replace_pairs_by_ratio(self):
+        alerts = "Uplink alert pages the on-call engineer."
+        report = "Backup job report is emailed to the team."
+        old = ["Intro", alerts, report, "End"]
+        new = ["Intro", "Backup job report is emailed to the whole team.",
+               "Uplink alert pages the on-call engineer now.", "End"]
+        self.assertEqual(matcher.align(old, new), [0, 2, 1, 3])
+
+    def test_align_replace_below_threshold_is_none(self):
+        old = ["Intro", "Alert when disk is full.", "End"]
+        new = ["Intro", "Completely unrelated sentence about billing cycles.", "End"]
+        self.assertEqual(matcher.align(old, new), [0, None, 2])
+
+    def test_align_uses_each_new_block_once(self):
+        old = ["Intro", "Alert when uplink loss is high.", "Alert when uplink loss is higher.", "End"]
+        new = ["Intro", "Alert when uplink loss is high!", "End"]
+        got = matcher.align(old, new)
+        self.assertEqual(got[0], 0)
+        self.assertEqual(got[3], 2)
+        self.assertEqual(sorted(g for g in got[1:3] if g is not None), [1])
+
+    def test_align_long_reworded_block_pairs(self):
+        # Over 200 characters difflib's default "junk" heuristic would sink this ratio.
+        sentence = "The collector restarted after the nightly job and nobody noticed the gap. "
+        old = ["Intro", sentence * 5 + "Operators agreed to review it.", "End"]
+        new = ["Intro", sentence * 5 + "Operators agreed to look at it.", "End"]
+        self.assertEqual(matcher.align(old, new), [0, 1, 2])
+
+    def test_align_huge_replace_pairs_by_position(self):
+        old = ["Alert number %03d fires when the disk is full." % i for i in range(101)]
+        new = ["Alert number %03d fires when the disk is almost full." % i for i in range(101)]
+        started = time.perf_counter()
+        got = matcher.align(old, new)  # 101 * 101 pairs is over the 10,000 limit
+        self.assertLess(time.perf_counter() - started, 2.0)
+        self.assertEqual(got, list(range(101)))
+
+
+class AlignedMatchTests(unittest.TestCase):
+    """With old_texts the comment stays in the block that replaced its own block."""
+
+    def find(self, anchor, new_texts, old_texts, allow_move=True, **kw):
+        return matcher.find(anchor, new_texts, allow_move, old_texts=old_texts, **kw)
+
     def test_deleted_list_item_does_not_slide(self):
-        # Near-identical list items: delete one and the next item slides into its place,
-        # taking over its surroundings. The comment must detach, not move to a sibling.
-        items = [
-            "Alert when packet loss on the uplink interface exceeds 5%.",
-            "Alert when packet loss on the downlink interface exceeds 5%.",
-            "Alert when packet loss on the backup interface exceeds 5%.",
+        texts = _list_texts()
+        for gone, name in enumerate(NAMES):
+            anchor = _anchor_for(texts, 1 + gone, "packet loss on the %s interface exceeds 5%%" % name)
+            new_texts = texts[:1 + gone] + texts[2 + gone:]
+            self.assertEqual(self.find(anchor, new_texts, texts), GONE, name)
+
+    def test_deleted_list_item_tail_highlight_does_not_slide(self):
+        texts = _list_texts()
+        for gone, name in enumerate(NAMES):
+            anchor = _anchor_for(texts, 1 + gone, "%s interface exceeds 5%%" % name)
+            new_texts = texts[:1 + gone] + texts[2 + gone:]
+            self.assertEqual(self.find(anchor, new_texts, texts), GONE, name)
+
+    def test_deleted_table_row_does_not_slide(self):
+        rows = [
+            "%s | Packet loss | Page on-call when loss stays above %d%% for ten minutes" % (name, limit)
+            for name, limit in (("uplink", 5), ("downlink", 3), ("backup", 8))
         ]
-        texts = ["Alerting requirements"] + items + ["Out of scope"]
-        for gone in range(3):
-            name = ("uplink", "downlink", "backup")[gone]
-            text = "packet loss on the %s interface exceeds 5%%" % name
+        texts = ["Interface | Metric | Alert threshold"] + rows
+        for gone, limit in enumerate((5, 3, 8)):
+            text = "Page on-call when loss stays above %d%% for ten minutes" % limit
             anchor = _anchor_for(texts, 1 + gone, text)
             new_texts = texts[:1 + gone] + texts[2 + gone:]
-            got = matcher.find(anchor, new_texts, allow_move=True)
-            self.assertEqual(got, Result("none", reason="textGone"), name)
+            self.assertEqual(self.find(anchor, new_texts, texts), GONE, limit)
 
-    def test_repetitive_surroundings_block_move(self):
-        # The old surroundings already hold two of the highlight's words ("stopped",
-        # "syncing"), so they cannot tell this passage from a look-alike: detach.
-        block = "The agent stopped syncing and then " + NEW + TRAIL
-        texts = ["Weekly summary.", block, "Closing remarks."]
-        anchor = _anchor_for(texts, 1, NEW)
-        anchor = Anchor(OLD, anchor.before, anchor.after)
-        self.assertIn("stopped syncing", anchor.before)
-        got = matcher.find(anchor, texts, allow_move=True)
-        self.assertEqual(got, Result("none", reason="textGone"))
+    def test_repeated_exact_text_in_deleted_item_is_ambiguous(self):
+        texts = _list_texts()
+        for gone in range(3):
+            anchor = _anchor_for(texts, 1 + gone, "interface exceeds 5%")
+            new_texts = texts[:1 + gone] + texts[2 + gone:]
+            got = self.find(anchor, new_texts, texts)
+            self.assertEqual(got, Result("none", reason="ambiguous"), gone)
+        # Nothing deleted: the text stays in its own item, even though siblings repeat it.
+        for item in range(3):
+            anchor = _anchor_for(texts, 1 + item, "interface exceeds 5%")
+            got = self.find(anchor, texts, texts, allow_move=False)
+            start = texts[1 + item].index("interface exceeds 5%")
+            self.assertEqual(got, Result("exact", 1 + item, start, start + len("interface exceeds 5%")))
 
-    def test_one_repeated_word_in_surroundings_still_moves(self):
-        # Only one highlight word ("stopped") in the surroundings: below the guard.
-        block = "The agent stopped and then " + NEW + TRAIL
-        texts = ["Weekly summary.", block, "Closing remarks."]
-        anchor = _anchor_for(texts, 1, NEW)
-        anchor = Anchor(OLD, anchor.before, anchor.after)
-        self.assertIn("stopped", anchor.before)
-        got = matcher.find(anchor, texts, allow_move=True)
-        self.assertEqual(got.status, "moved")
-        self.assertEqual(_span_text(texts, got), NEW)
+    def test_moved_paragraph_still_attaches(self):
+        old = ["Intro", "Section A", "The collector restarted at noon and nobody noticed.",
+               "Section B", "Closing"]
+        new = ["Intro", "Section A", "Section B",
+               "The collector restarted at noon and nobody noticed.", "Closing"]
+        anchor = _anchor_for(old, 2, "restarted at noon")
+        got = self.find(anchor, new, old, allow_move=False)
+        start = new[3].index("restarted at noon")
+        self.assertEqual(got, Result("exact", 3, start, start + len("restarted at noon")))
 
-    def test_stopwords_in_surroundings_do_not_count(self):
-        # "the" and "since" are highlight words; "the" is a stopword, so "the ... the" is
-        # one repeat at most and the guard does not fire.
-        block = "Since the agent restarted, the " + NEW + " and nobody noticed."
-        texts = ["Weekly summary.", block, "Closing remarks."]
-        anchor = _anchor_for(texts, 1, NEW)
-        anchor = Anchor(OLD, anchor.before, anchor.after)
-        got = matcher.find(anchor, texts, allow_move=True)
-        self.assertEqual(got.status, "moved")
+    def test_moved_paragraph_with_repeated_text_is_ambiguous(self):
+        sentence = "The collector restarted at noon and nobody noticed."
+        old = ["Intro", sentence, "Section B", "Other notes. " + sentence, "Closing"]
+        new = ["Intro", "Section B", "Other notes. " + sentence, sentence, "Closing"]
+        anchor = _anchor_for(old, 1, "restarted at noon")
+        got = self.find(anchor, new, old, allow_move=False)
+        self.assertEqual(got, Result("none", reason="ambiguous"))
+
+    def test_reword_in_lookalike_list_moves(self):
+        texts = _list_texts()
+        text = "packet loss on the downlink interface exceeds 5%"
+        anchor = _anchor_for(texts, 2, text)
+        reworded = "packet loss on the downlink interface goes above 5"
+        new_texts = list(texts)
+        new_texts[2] = texts[2].replace(text, reworded + "%")
+        got = self.find(anchor, new_texts, texts)
+        start = new_texts[2].index(reworded)  # the span ends on the last word, before "%"
+        self.assertEqual(got, Result("moved", 2, start, start + len(reworded)))
+
+    def test_delete_plus_sibling_reword(self):
+        texts = _list_texts()
+        text_a = "packet loss on the uplink interface exceeds 5%"
+        text_b = "packet loss on the downlink interface exceeds 5%"
+        anchor_a = _anchor_for(texts, 1, text_a)
+        anchor_b = _anchor_for(texts, 2, text_b)
+        reworded = "packet loss on the downlink interface goes above 5"
+        new_texts = [texts[0], texts[2].replace(text_b, reworded + "%"), texts[3], texts[4]]
+        self.assertEqual(self.find(anchor_a, new_texts, texts), GONE)
+        got = self.find(anchor_b, new_texts, texts)
+        start = new_texts[1].index(reworded)
+        self.assertEqual(got, Result("moved", 1, start, start + len(reworded)))
+
+    def test_precomputed_alignment_gives_the_same_answer(self):
+        texts = _list_texts()
+        anchor = _anchor_for(texts, 2, "packet loss on the downlink interface exceeds 5%")
+        new_texts = texts[:2] + texts[3:]
+        alignment = matcher.align(texts, new_texts)
+        self.assertEqual(alignment, [0, 1, None, 2, 3])
+        got = matcher.find(anchor, new_texts, True, old_texts=texts, alignment=alignment)
+        self.assertEqual(got, GONE)
+
+    def test_without_old_texts_nothing_changes(self):
+        # No old page (or no block index): the original behaviour, which cannot tell
+        # look-alike items apart.
+        texts = _list_texts()
+        anchor = _anchor_for(texts, 1, "packet loss on the uplink interface exceeds 5%")
+        new_texts = texts[:1] + texts[2:]
+        self.assertEqual(matcher.find(anchor, new_texts, True).status, "moved")
+        unknown = Anchor(anchor.text, anchor.before, anchor.after)  # block = -1
+        self.assertEqual(matcher.find(unknown, new_texts, True, old_texts=texts).status, "moved")
 
 
 class SpeedTests(unittest.TestCase):
@@ -341,23 +456,29 @@ class SpeedTests(unittest.TestCase):
             "".join(rng.choice(letters) for _ in range(rng.randint(3, 7)))
             for _ in range(400)
         })
-        texts = [" ".join(rng.choice(vocab) for _ in range(20)) for _ in range(250)]
-        self.assertEqual(sum(len(t.split()) for t in texts), 5000)
+        old_texts = [" ".join(rng.choice(vocab) for _ in range(20)) for _ in range(250)]
+        self.assertEqual(sum(len(t.split()) for t in old_texts), 5000)
+        texts = list(old_texts)
         anchors = []  # (anchor, block it came from)
-        while len(anchors) < 20:
-            block = rng.randrange(len(texts))
-            words = texts[block].split()
+        for block in rng.sample(range(len(old_texts)), 40):
+            if len(anchors) == 20:
+                break
+            words = old_texts[block].split()
             first = rng.randrange(0, 12)
             span = words[first:first + 6]
             old = " ".join(span)
-            if texts[block].count(old) == 1:
-                anchors.append((_anchor_for(texts, block, old), block))
-                # Reword a middle word to one that is not in the vocabulary.
-                span[3] = "zzqx"
-                words[first:first + 6] = span
-                texts[block] = " ".join(words)
+            if old_texts[block].count(old) != 1:
+                continue
+            anchors.append((_anchor_for(old_texts, block, old), block))
+            # Reword a middle word to one that is not in the vocabulary.
+            span[3] = "zzqx"
+            words[first:first + 6] = span
+            texts[block] = " ".join(words)
+        self.assertEqual(len(anchors), 20)
         started = time.perf_counter()
-        results = [matcher.find(anchor, texts, allow_move=True) for anchor, _ in anchors]
+        # Each call lines the old page up with the new one itself: the slowest way to call.
+        results = [matcher.find(anchor, texts, allow_move=True, old_texts=old_texts)
+                   for anchor, _ in anchors]
         elapsed = time.perf_counter() - started
         self.assertLess(elapsed, 2.0)
         for (anchor, block), got in zip(anchors, results):
@@ -382,20 +503,19 @@ class SpeedTests(unittest.TestCase):
                 for _ in range(count)
             )
 
-        texts = [sentence(50) for _ in range(100)]
-        self.assertEqual(sum(len(t.split()) for t in texts), 5000)
-        anchors = []  # (anchor, block it came from, block count at that time)
+        old_texts = [sentence(50) for _ in range(100)]
+        self.assertEqual(sum(len(t.split()) for t in old_texts), 5000)
+        texts = list(old_texts)
+        anchors = []  # (anchor, block it came from)
         for block in range(0, 100, 10):
-            words = texts[block].split()
+            words = old_texts[block].split()
             first = rng.randrange(0, 15)
             span = words[first:first + 30]
-            old = " ".join(span)
-            anchors.append((_anchor_for(texts, block, old), block))
+            anchors.append((_anchor_for(old_texts, block, " ".join(span)), block))
             for index in (7, 22):  # reword two words in the middle
                 span[index] = "zzqx%d" % index
-            reworded = words[:first] + span + words[first + 30:]
-            texts[block] = " ".join(reworded)
-        # Near-copies: replace some other blocks with the first anchor's block, lightly changed.
+            texts[block] = " ".join(words[:first] + span + words[first + 30:])
+        # Near-copies: other blocks become the first anchor's block, lightly changed.
         original = texts[anchors[0][1]].split()
         for other in (3, 33, 63):
             copy = list(original)
@@ -403,7 +523,8 @@ class SpeedTests(unittest.TestCase):
                 copy[index] = rng.choice(vocab)
             texts[other] = " ".join(copy)
         started = time.perf_counter()
-        results = [matcher.find(anchor, texts, allow_move=True) for anchor, _ in anchors]
+        results = [matcher.find(anchor, texts, allow_move=True, old_texts=old_texts)
+                   for anchor, _ in anchors]
         elapsed = time.perf_counter() - started
         self.assertLess(elapsed, 2.0)
         for (anchor, block), got in list(zip(anchors, results))[1:]:
