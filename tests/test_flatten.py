@@ -83,6 +83,12 @@ class JiraTests(unittest.TestCase):
         self.assertEqual(counts, {"jira": 0, "jiraList": 1})
         self.assertEqual(unresolved, [])
 
+    def test_jira_macro_with_neither_key_nor_query_is_removed(self):
+        out, counts, unresolved = run("<p>a</p>" + macro("jira", param("server", "System JIRA")) + "<p>b</p>")
+        self.assertEqual(out, "<p>a</p><p>b</p>")
+        self.assertEqual(counts, {"jira": 1})
+        self.assertEqual(unresolved, [])
+
     def test_jira_list_alone_in_table_cell_is_a_paragraph(self):
         body = "<table><tbody><tr><td>%s</td></tr></tbody></table>" % jira_list("project = ABC")
         out, _, _ = run(body)
@@ -122,8 +128,8 @@ class UnwrapTests(unittest.TestCase):
                    macro("panel", param("bgColor", "#eee"), rich("<p>Panel <em>text</em></p>")),
                    macro("excerpt", "", rich("<p>Excerpt text</p>"))))
         out, counts, _ = run(body)
-        self.assertEqual(out, "<p>a</p><p>Info text</p><p>Note text</p><p>Panel <em>text</em></p>"
-                              "<p>Excerpt text</p><p>z</p>")
+        self.assertEqual(out, "<p>a</p><p><strong>Heads up</strong></p><p>Info text</p><p>Note text</p>"
+                              "<p>Panel <em>text</em></p><p>Excerpt text</p><p>z</p>")
         self.assertEqual(counts, {"jira": 0, "info": 1, "note": 1, "panel": 1, "excerpt": 1})
 
     def test_any_other_macro_with_rich_body_is_unwrapped(self):
@@ -142,8 +148,17 @@ class UnwrapTests(unittest.TestCase):
         out, _, _ = run(macro("expand", "", rich("<p>Hidden</p>")))
         self.assertEqual(out, "<p>Hidden</p>")
 
-    def test_only_expand_gets_a_title_paragraph(self):
-        out, _, _ = run(macro("panel", param("title", "Box"), rich("<p>x</p>")))
+    def test_titled_panels_keep_their_title(self):
+        body = "".join(macro(name, param("title", "A &amp; B"), rich("<p>x</p>"))
+                       for name in ("panel", "info", "note", "tip", "warning"))
+        out, counts, _ = run(body)
+        self.assertEqual(out, "<p><strong>A &amp; B</strong></p><p>x</p>" * 5)
+        self.assertEqual(counts, {"jira": 0, "panel": 1, "info": 1, "note": 1, "tip": 1, "warning": 1})
+
+    def test_untitled_panel_has_no_title_paragraph(self):
+        out, _, _ = run(macro("panel", param("bgColor", "#eee"), rich("<p>x</p>")))
+        self.assertEqual(out, "<p>x</p>")
+        out, _, _ = run(macro("panel", param("title", "  "), rich("<p>x</p>")))
         self.assertEqual(out, "<p>x</p>")
 
     def test_empty_rich_body(self):

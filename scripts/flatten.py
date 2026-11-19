@@ -124,7 +124,7 @@ def _plain_form(body: str, tokens: List[storage.Token], macro: _Macro) -> Tuple[
         line = "Jira list: " + _text(macro.params["jqlquery"])
         return "jiraList", "<p>%s</p>" % line if _between_blocks(body, tokens, macro) else line
     if macro.rich is not None:
-        title = macro.params.get("title", "") if macro.name == "expand" else ""
+        title = macro.params.get("title", "")
         heading = "<p><strong>%s</strong></p>" % _text(title) if title else ""
         return macro.name, heading + macro.rich
     if macro.plain is not None:
@@ -156,7 +156,7 @@ def make_plain(body: str, view_html: str) -> Tuple[str, Dict[str, int], List[str
 
     Jira issue macros become links (cards.jira_macros_to_links). Every other macro except `code` and
     `status` is replaced: a Jira list by its query as text, a macro with a rich text body by that
-    body (an expand's title first), one with only a plain text body by a paragraph of its text, and
+    body (its `title` parameter first, as a bold paragraph), one with only a plain text body by a paragraph of its text, and
     one with neither by nothing. Comment markers inside an unwrapped body are carried over as they
     were. Counts have `jira` (always), `jiraList`, and the macro name of every other kind made plain.
     """
