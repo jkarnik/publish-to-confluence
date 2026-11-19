@@ -136,19 +136,121 @@ class BlockMapTests(unittest.TestCase):
 
     def test_task_body_visible(self):
         body = (
-            "<ac:task-list><ac:task><ac:task-id>1</ac:task-id>"
-            "<ac:task-status>incomplete</ac:task-status>"
-            "<ac:task-body>Do <strong>this</strong> &amp; that</ac:task-body></ac:task></ac:task-list>"
+            "<ac:task-list>"
+            "<ac:task><ac:task-id>1</ac:task-id><ac:task-status>incomplete</ac:task-status>"
+            "<ac:task-body>Do <strong>this</strong> &amp; that</ac:task-body></ac:task>"
+            "<ac:task><ac:task-id>2</ac:task-id><ac:task-status>complete</ac:task-status>"
+            "<ac:task-body><span>Second</span> one</ac:task-body></ac:task>"
+            "</ac:task-list>"
         )
         result = blocks(body)
         self.assertIn("ac:task-body", BLOCK_TAGS)
-        # K8b hides the task id and status; here only the task body's own block is checked.
-        task = [b for b in result if b.text == "Do this & that"]
-        self.assertEqual(len(task), 1)
-        b = task[0]
+        # The task id and status never show up as text.
+        self.assertEqual([b.text for b in result], ["Do this & that", "Second one"])
+        b = result[0]
         self.assertEqual(body[b.starts[0]:b.ends[0]], "D")
         self.assertEqual(body[b.starts[-1]:b.ends[-1]], "t")
         self.assert_map(body)
+
+    def test_code_macro_hidden(self):
+        body = (
+            "<p>Before</p>"
+            '<ac:structured-macro ac:name="code" ac:schema-version="1">'
+            '<ac:parameter ac:name="language">python</ac:parameter>'
+            "<ac:plain-text-body><![CDATA[x = '<b>bold</b>' & more]]></ac:plain-text-body>"
+            "</ac:structured-macro>"
+            "<p>After</p>"
+        )
+        self.assertEqual(texts(body), ["Before", "After"])
+        self.assert_map(body)
+        # A <pre> block is hidden the same way, and still separates the text around it.
+        self.assertEqual(texts("<p>one</p><pre>code &amp; more</pre><p>two</p>"), ["one", "two"])
+        self.assertEqual(texts("before<pre>code</pre>after"), ["before", "after"])
+        # CDATA on its own is never visible.
+        self.assertEqual(texts("<p>a<![CDATA[hidden]]>b</p>"), ["ab"])
+
+    def test_macros_hidden(self):
+        jira = (
+            '<ac:structured-macro ac:name="jira" ac:schema-version="1">'
+            '<ac:parameter ac:name="key">ABC-123</ac:parameter></ac:structured-macro>'
+        )
+        status = (
+            '<ac:structured-macro ac:name="status">'
+            '<ac:parameter ac:name="title">DONE</ac:parameter>'
+            '<ac:parameter ac:name="colour">Green</ac:parameter></ac:structured-macro>'
+        )
+        body = "<p>See %s for details, now %s ok</p>" % (jira, status)
+        result = blocks(body)
+        # The hidden elements vanish and the spaces around them collapse. The block stays whole.
+        self.assertEqual([b.text for b in result], ["See for details, now ok"])
+        b = result[0]
+        at = b.text.index("for")
+        self.assertEqual(body[b.starts[at]:b.ends[at]], "f")
+        self.assertGreater(b.starts[at], body.index(jira) + len(jira) - 1)
+        self.assert_map(body)
+        # In the middle of a word, the pieces join.
+        mid = "<p>foo%sbar</p>" % jira
+        self.assertEqual(texts(mid), ["foobar"])
+        self.assert_map(mid)
+        # An empty macro tag is just skipped.
+        self.assertEqual(texts('<p>a <ac:structured-macro ac:name="toc"/> b</p>'), ["a b"])
+        # A macro with a rich-text body hides all of it, and its paragraphs make no blocks.
+        info = (
+            '<ac:structured-macro ac:name="info"><ac:rich-text-body>'
+            "<p>Inside note</p><p>More</p></ac:rich-text-body></ac:structured-macro>"
+        )
+        self.assertEqual(texts("<p>Top</p>%s<p>Bottom</p>" % info), ["Top", "Bottom"])
+        self.assertEqual(texts("<p>x %s y</p>" % info), ["x y"])
+        # A macro inside a macro of the same name hides everything up to the outer end.
+        nested = (
+            '<ac:structured-macro ac:name="expand"><ac:rich-text-body>'
+            '<ac:structured-macro ac:name="info"><ac:rich-text-body><p>deep</p></ac:rich-text-body>'
+            "</ac:structured-macro><p>still hidden</p></ac:rich-text-body></ac:structured-macro>"
+        )
+        self.assertEqual(texts("<p>a</p>%s<p>b</p>" % nested), ["a", "b"])
+        self.assertEqual(texts("<p>a %s b</p>" % nested), ["a b"])
+
+    def test_cards_hidden_links_visible(self):
+        card = '<a href="https://example.atlassian.net/wiki/x" data-card-appearance="inline">https://example.atlassian.net/wiki/x</a>'
+        link = '<a href="https://example.com/docs">the docs</a>'
+        body = "<p>See %s and %s now</p>" % (card, link)
+        result = blocks(body)
+        self.assertEqual([b.text for b in result], ["See and the docs now"])
+        b = result[0]
+        at = b.text.index("the docs")
+        self.assertEqual(body[b.starts[at]:b.ends[at + 7]], "the docs")
+        self.assert_map(body)
+        # Block and embed cards, and an empty card tag, are hidden too.
+        for appearance in ("block", "embed"):
+            tag = '<a data-card-appearance="%s" href="https://example.atlassian.net/y">label</a>' % appearance
+            self.assertEqual(texts("<p>one %s two</p>" % tag), ["one two"], appearance)
+        self.assertEqual(texts('<p>a <a data-card-appearance="inline" href="u"/> b</p>'), ["a b"])
+        # A comment marker around a hidden card contributes no text, and one around a link keeps it.
+        marked = '<ac:inline-comment-marker ac:ref="m1">%s</ac:inline-comment-marker>' % card
+        self.assertEqual(texts("<p>Look %s here</p>" % marked), ["Look here"])
+        self.assertEqual(texts("<p>Only %s</p>" % marked), ["Only"])
+        marked_link = '<ac:inline-comment-marker ac:ref="m2">%s</ac:inline-comment-marker>' % link
+        self.assertEqual(texts("<p>Look %s here</p>" % marked_link), ["Look the docs here"])
+        # A card that is the whole paragraph leaves no block.
+        self.assertEqual(texts("<p>%s</p><p>next</p>" % card), ["next"])
+
+    def test_images_and_emoticons_hidden(self):
+        image = '<ac:image ac:alt="chart" ac:width="400"><ri:attachment ri:filename="chart.png"/></ac:image>'
+        body = (
+            "<p>Look %s here %s ok" % (image, '<ac:emoticon ac:name="smile" ac:emoji-shortname=":smile:"/>')
+            + ' on <time datetime="2026-11-19"/> and <time datetime="2026-01-02">Jan 2</time> done</p>'
+        )
+        result = blocks(body)
+        self.assertEqual([b.text for b in result], ["Look here ok on and done"])
+        self.assert_map(body)
+        # A bare ri: element (page, user or attachment reference) adds nothing.
+        refs = '<p>a<ri:user ri:account-id="u1"/>b<ri:page ri:content-title="T"></ri:page>c</p>'
+        self.assertEqual(texts(refs), ["abc"])
+        # An image on its own leaves no block; a url image is hidden the same way.
+        self.assertEqual(texts("<p>%s</p><p>x</p>" % image), ["x"])
+        url_image = '<ac:image><ri:url ri:value="https://example.com/a.png"/></ac:image>'
+        self.assertEqual(texts("<p>p %s q</p>" % url_image), ["p q"])
+
 
     def test_empty_and_plain_bodies(self):
         self.assertEqual(blocks(""), [])
