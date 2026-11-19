@@ -30,6 +30,19 @@ def issue_link(key):
     return '<a href="%s">%s</a>' % (url, url)
 
 
+def macro(name, params="", body=""):
+    return '<ac:structured-macro ac:name="%s" ac:schema-version="1">%s%s</ac:structured-macro>' % (
+        name, params, body)
+
+
+def param(name, value):
+    return '<ac:parameter ac:name="%s">%s</ac:parameter>' % (name, value)
+
+
+def rich(inner):
+    return "<ac:rich-text-body>%s</ac:rich-text-body>" % inner
+
+
 def view_of(*keys):
     return "".join('<p><a href="%s/browse/%s">%s</a></p>' % (SITE, key, key) for key in keys)
 
@@ -123,6 +136,66 @@ class PrepareTests(unittest.TestCase):
         self.assertEqual(out["madePlain"], {"jira": 1, "unresolved": []})
         self.assertEqual(out["unembedded"], 0)
 
+    def test_panels_made_plain(self):
+        panel = macro("info", param("title", "Heads up"), rich("<p>Careful here.</p>"))
+        toc = macro("toc", param("maxLevel", "3"))
+        client = make_client("<p>Intro</p>%s%s<p>End</p>" % (toc, panel))
+        out, code = run(client)
+        self.assertEqual(code, 0)
+        self.assertEqual(client.saves[0][1], "<p>Intro</p><p><strong>Heads up</strong></p>"
+                                             "<p>Careful here.</p><p>End</p>")
+        self.assertEqual(out["madePlain"], {"jira": 0, "info": 1, "toc": 1, "unresolved": []})
+        self.assertEqual(out["version"], 6)
+        self.assertEqual(client.saves[0][2], "Make 1 info panel and 1 table of contents plain "
+                                             "before republishing")
+
+    def test_code_and_status_left(self):
+        code_macro = macro("code", param("language", "py"),
+                           "<ac:plain-text-body><![CDATA[print(1)]]></ac:plain-text-body>")
+        status = macro("status", param("title", "Done") + param("colour", "Green"))
+        body = "<p>a</p>%s<p>%s</p>" % (code_macro, status)
+        client = make_client(body)
+        out, code = run(client)
+        self.assertEqual(code, 0)
+        self.assertEqual(client.saves, [])  # nothing blocks, so no edit at all
+        self.assertEqual(out["madePlain"], {"jira": 0, "unresolved": []})
+
+        # With a panel to fix, code and status still come out exactly as stored.
+        panel = macro("note", "", rich("<p>n</p>"))
+        client = make_client(body + panel)
+        out, code = run(client)
+        self.assertEqual(code, 0)
+        self.assertEqual(client.saves[0][1], body + "<p>n</p>")
+        self.assertEqual(out["madePlain"], {"jira": 0, "note": 1, "unresolved": []})
+
+    def test_unresolved_with_panels(self):
+        body = macro("tip", "", rich("<p>t</p>")) + "<p>%s</p>" % jira_macro("ABC-2")
+        client = make_client(body, view="")
+        out, code = run(client)
+        self.assertEqual(code, 1)  # the stuck key still gives exit 1
+        self.assertEqual(client.saves[0][1], "<p>t</p><p>%s</p>" % jira_macro("ABC-2"))
+        self.assertEqual(out["madePlain"], {"jira": 0, "tip": 1, "unresolved": ["ABC-2"]})
+        self.assertNotIn("error", out)
+
+    def test_message_for_every_kind(self):
+        body = ("<p>%s</p><p>%s</p><p>%s</p>%s%s%s"
+                % (embed("a.png"), jira_macro("ABC-123"), jira_macro("ABC-124"),
+                   macro("info", "", rich("<p>i</p>")), macro("info", "", rich("<p>j</p>")),
+                   macro("expand", "", rich("<p>e</p>"))))
+        client = make_client(body, notes={"a.png": OURS}, view=view_of("ABC-123", "ABC-124"))
+        run(client)
+        self.assertEqual(client.saves[0][2],
+                         "Swap 1 image for a placeholder, turn 2 Jira issues into links "
+                         "and make 1 expand section and 2 info panels plain before republishing")
+
+    def test_save_failure_reports_no_work(self):
+        body = macro("info", "", rich("<p>i</p>"))
+        client = make_client(body, fail={"save_body": (409, "conflict")})
+        out, code = run(client)
+        self.assertEqual(code, 1)
+        self.assertEqual(out["madePlain"], {"jira": 0, "unresolved": []})
+        self.assertIn("HTTP 409", out["error"])
+
     def test_view_is_requested(self):
         seen = []
         client = make_client("<p>x</p>")
@@ -183,8 +256,8 @@ class PrepareTests(unittest.TestCase):
         self.assertEqual(len(client.saves), 1)
         page_id, _body, message = client.saves[0]
         self.assertEqual(page_id, PAGE)
-        self.assertEqual(message, "Swap 2 images for placeholders and make 1 Jira issue "
-                                  "a link before republishing")
+        self.assertEqual(message, "Swap 2 images for placeholders and turn 1 Jira issue "
+                                  "into a link before republishing")
         self.assertEqual(out["version"], 6)  # the saved version
         self.assertEqual(out, {"pageId": PAGE, "version": 6, "unembedded": 2,
                                "madePlain": {"jira": 1, "unresolved": []},
