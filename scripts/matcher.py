@@ -16,8 +16,8 @@ MIN_MOVE_WORDS = 3
 # Without the old page, surroundings that already hold this many of the highlight's own
 # words can't tell look-alike passages apart (a deleted list item's sibling slides in).
 REPEAT_WORDS = 2
-# Pairing old and new blocks inside a replaced region (see align).
-MAX_PAIRS = 10000  # more old x new pairs than this: pair by position, if the counts match
+# Pairing the old and new blocks left unmatched anywhere on the page (see align).
+MAX_PAIRS = 10000  # more unmatched old x new pairs than this: none of them is paired
 PAIR_MARGIN = 0.05  # a pair must beat every rival sharing a block with it by this much
 MIN_PAIR_RATIO = 0.5
 CHAR_RATIO_LIMIT = 150  # blocks up to this many characters each compare by character
@@ -214,22 +214,45 @@ def _tokens(text: str) -> Tuple[str, ...]:
     return tuple(w.lower() for w in _WORD.findall(text))
 
 
-def _pair_ratio(old: str, new: str) -> float:
-    """difflib ratio of two blocks, or 0.0 when a cheap upper bound already rules out the pair.
+def _pair_sequences(old: str, new: str):
+    """What two blocks are compared as: their characters, or their words when either is long.
 
     Blocks up to CHAR_RATIO_LIMIT characters each are compared character by character;
     longer ones word by word, because a character ratio costs about a millisecond per
-    300-character pair and adds up to seconds over a big replaced region. autojunk is off
-    because, with it on, difflib treats common characters as junk once a block passes 200
-    characters and the ratio of a lightly reworded paragraph collapses.
+    300-character pair and adds up to seconds over a big replaced region.
     """
-    first, second = old, new
     if len(old) > CHAR_RATIO_LIMIT or len(new) > CHAR_RATIO_LIMIT:
         words_old, words_new = _tokens(old), _tokens(new)
         if words_old and words_new:
-            first, second = words_old, words_new
+            return words_old, words_new
+    return old, new
+
+
+@lru_cache(maxsize=4096)
+def _counts(sequence) -> Counter:
+    return Counter(sequence)
+
+
+def _ratio_bound(old: str, new: str) -> float:
+    """difflib's quick_ratio for the pair (an upper bound on its ratio), from cached counts."""
+    first, second = _pair_sequences(old, new)
+    total = len(first) + len(second)
+    if not total:
+        return 1.0
+    small, large = sorted((_counts(first), _counts(second)), key=len)
+    return 2.0 * sum(min(count, large[item]) for item, count in small.items()) / total
+
+
+def _pair_ratio(old: str, new: str, floor: float = MIN_PAIR_RATIO) -> float:
+    """difflib ratio of two blocks, or 0.0 when a cheap upper bound is already under floor.
+
+    See _pair_sequences for characters or words. autojunk is off because, with it on,
+    difflib treats common characters as junk once a block passes 200 characters and the
+    ratio of a lightly reworded paragraph collapses.
+    """
+    first, second = _pair_sequences(old, new)
     sequence = difflib.SequenceMatcher(None, first, second, autojunk=False)
-    if sequence.real_quick_ratio() < MIN_PAIR_RATIO or sequence.quick_ratio() < MIN_PAIR_RATIO:
+    if sequence.real_quick_ratio() < floor or sequence.quick_ratio() < floor:
         return 0.0
     return sequence.ratio()
 
@@ -252,34 +275,56 @@ def _pair_identical(old_texts: List[str], texts: List[str], mapping: List[Option
             taken.add(news[0])
 
 
-def _pair_region(old_texts: List[str], texts: List[str], olds: List[int], news: List[int],
-                 mapping: List[Optional[int]], taken: set) -> None:
-    """Pair the still-unmatched blocks of one replaced region."""
-    if not olds or not news:
-        return
-    if len(olds) * len(news) > MAX_PAIRS:
-        # Too many pairs to score. Position is only a fair guide when both sides have the
-        # same number of blocks; otherwise one deletion would shift every pair after it.
-        if len(olds) == len(news):
-            for i, j in zip(olds, news):
-                if _pair_ratio(old_texts[i], texts[j]) >= MIN_PAIR_RATIO:
-                    mapping[i] = j
-                    taken.add(j)
-        return
-    ratios = {}
+def _best_other(top: List[Tuple[float, int]], other: int) -> float:
+    """The highest ratio in top (a block's two best pairs) that is not with block other."""
+    return max((ratio for ratio, block in top if block != other), default=0.0)
+
+
+def _pair_by_ratio(old_texts: List[str], texts: List[str], mapping: List[Optional[int]],
+                   taken: set) -> None:
+    """Pair the old and new blocks still unmatched anywhere on the page by difflib ratio.
+
+    Every unmatched old block is a rival for every unmatched new block, whether difflib
+    put it in the same replaced region, another one, or a deleted or inserted run.
+    """
+    olds = [i for i, new_block in enumerate(mapping) if new_block is None]
+    news = [j for j in range(len(texts)) if j not in taken]
+    if not olds or not news or len(olds) * len(news) > MAX_PAIRS:
+        return  # too many pairs to score: they all stay unpaired
+    # A pair is accepted at MIN_PAIR_RATIO or more, so only rivals within PAIR_MARGIN of
+    # that can stop one; anything lower counts as no rival.
+    floor = MIN_PAIR_RATIO - PAIR_MARGIN
+    bounds = []
     for i in olds:
         for j in news:
-            ratio = _pair_ratio(old_texts[i], texts[j])
-            if ratio >= MIN_PAIR_RATIO:
-                ratios[(i, j)] = ratio
-    rivals_of_old: dict = {}
-    rivals_of_new: dict = {}
+            bound = _ratio_bound(old_texts[i], texts[j])
+            if bound >= floor:
+                bounds.append((bound, i, j))
+    # Exact ratios cost far more than bounds, so they are worked out highest bound first,
+    # and only for pairs that matter. A pair whose bound is PAIR_MARGIN or more below the
+    # best exact ratio already found for its old block, and for its new block, can neither
+    # pair nor stop the pairing of anything, so skipping it changes no result.
+    bounds.sort(key=lambda item: -item[0])
+    top_of_old: dict = {}  # block -> its two best (ratio, other block) so far, best first
+    top_of_new: dict = {}
+    ratios = {}
+    for bound, i, j in bounds:
+        top_old, top_new = top_of_old.setdefault(i, []), top_of_new.setdefault(j, [])
+        if (top_old and top_old[0][0] - bound >= PAIR_MARGIN
+                and top_new and top_new[0][0] - bound >= PAIR_MARGIN):
+            continue
+        ratio = _pair_ratio(old_texts[i], texts[j], floor)
+        if ratio < floor:
+            continue
+        ratios[(i, j)] = ratio
+        for top, other in ((top_old, j), (top_new, i)):
+            top.append((ratio, other))
+            top.sort(reverse=True)
+            del top[2:]
     for (i, j), ratio in ratios.items():
-        rivals_of_old.setdefault(i, []).append((j, ratio))
-        rivals_of_new.setdefault(j, []).append((i, ratio))
-    for (i, j), ratio in ratios.items():
-        rival = max([r for other, r in rivals_of_old[i] if other != j]
-                    + [r for other, r in rivals_of_new[j] if other != i], default=0.0)
+        if ratio < MIN_PAIR_RATIO:
+            continue
+        rival = max(_best_other(top_of_old[i], j), _best_other(top_of_new[j], i))
         # Ties and near-ties stay unpaired. A pair that beats all its rivals by the margin
         # is the only accepted pair for both of its blocks.
         if ratio - rival >= PAIR_MARGIN:
@@ -291,28 +336,22 @@ def align(old_texts: List[str], texts: List[str]) -> List[Optional[int]]:
     """For each old block, the index of the new block that replaced it, or None.
 
     Unchanged blocks line up through difflib's opcodes. Among the rest, blocks whose text
-    is identical and unique on both sides pair first. Inside each replaced region the
-    remaining blocks pair by difflib ratio: a pair needs ratio >= 0.5 and has to beat
-    every rival sharing a block with it by PAIR_MARGIN, so ties stay unpaired. A region
-    over MAX_PAIRS pairs by position only when it has equal block counts on both sides.
-    Deleted and unpaired old blocks map to None.
+    is identical and unique on both sides pair first. Then every still-unmatched old block
+    is compared with every still-unmatched new block on the page: a pair needs ratio >= 0.5
+    and has to beat every other pair sharing its old or its new block by PAIR_MARGIN, so
+    ties and near-ties stay unpaired. With more than MAX_PAIRS such pairs, none is scored
+    and none is paired. Deleted and unpaired old blocks map to None.
     """
     mapping: List[Optional[int]] = [None] * len(old_texts)
     taken: set = set()
-    regions = []
     opcodes = difflib.SequenceMatcher(None, old_texts, texts, autojunk=False).get_opcodes()
-    for tag, i1, i2, j1, j2 in opcodes:
+    for tag, i1, i2, j1, _ in opcodes:
         if tag == "equal":
             for offset in range(i2 - i1):
                 mapping[i1 + offset] = j1 + offset
                 taken.add(j1 + offset)
-        elif tag == "replace":
-            regions.append((i1, i2, j1, j2))
     _pair_identical(old_texts, texts, mapping, taken)
-    for i1, i2, j1, j2 in regions:
-        olds = [i for i in range(i1, i2) if mapping[i] is None]
-        news = [j for j in range(j1, j2) if j not in taken]
-        _pair_region(old_texts, texts, olds, news, mapping, taken)
+    _pair_by_ratio(old_texts, texts, mapping, taken)
     return mapping
 
 
