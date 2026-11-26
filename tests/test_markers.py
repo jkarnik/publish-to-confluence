@@ -7,7 +7,9 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import helpers  # noqa: F401  (puts scripts/ on sys.path)
 
 from markers import anchor_for, refs
+from marker_wrap import wrap
 from matcher import CONTEXT, Anchor
+from visible_text import blocks
 
 
 def marker(ref, inner):
@@ -161,6 +163,94 @@ class AnchorTests(unittest.TestCase):
     def test_no_visible_text_anywhere(self):
         body = "<p>" + marker("R1", CARD) + "</p>"
         self.assertEqual(anchor_for(body, "R1", "the card"), Anchor("the card", "", ""))
+
+
+CARD_URL = "https://example.atlassian.net/browse/ABC-123"
+
+
+class CardWordsTests(unittest.TestCase):
+    WORDS = {CARD_URL: ["design doc"]}
+
+    def test_marker_around_a_card_and_words_reads_the_links_words(self):
+        body = "<p>Read " + marker("R1", "the " + CARD + " before the review") + " starts.</p>"
+        found = anchor_for(body, "R1", "the design doc before the review", self.WORDS)
+        self.assertEqual(found, Anchor("the design doc before the review", "Read", "starts.", block=0))
+
+    def test_same_marker_without_the_map_skips_the_card(self):
+        body = "<p>Read " + marker("R1", "the " + CARD + " before the review") + " starts.</p>"
+        self.assertEqual(anchor_for(body, "R1", "x").text, "the before the review")
+        self.assertEqual(anchor_for(body, "R1", "x", None).text, "the before the review")
+        self.assertEqual(anchor_for(body, "R1", "x", link_words=None).text, "the before the review")
+
+    def test_marker_around_only_a_card_reads_its_words_and_block(self):
+        body = "<p>Before block</p><p>" + marker("R1", CARD) + "</p><p>After block</p>"
+        self.assertEqual(anchor_for(body, "R1", "the card", self.WORDS),
+                         Anchor("design doc", "Before block", "After block", block=1))
+        # With no map the card stays hidden: the selection and a block of -1, as before.
+        self.assertEqual(anchor_for(body, "R1", "the card"), Anchor("the card", "Before block", "After block"))
+
+    def test_marker_around_a_card_when_the_file_has_no_such_link_uses_the_selection(self):
+        body = "<p>See " + marker("R1", CARD) + " for details</p>"
+        found = anchor_for(body, "R1", "ABC-123 card", {"https://example.atlassian.net/other": ["x"]})
+        self.assertEqual(found, Anchor("ABC-123 card", "See", "for details"))
+
+    def test_second_card_to_one_url_reads_the_second_link(self):
+        body = "<p>" + CARD + " then " + marker("R1", CARD) + " end</p>"
+        found = anchor_for(body, "R1", "x", {CARD_URL: ["first", "second"]})
+        self.assertEqual(found, Anchor("second", "first then", "end", block=0))
+
+    def test_context_reads_card_words_too(self):
+        body = "<p>Read " + CARD + " then " + marker("R1", "the review") + " starts</p>"
+        found = anchor_for(body, "R1", "x", self.WORDS)
+        self.assertEqual(found, Anchor("the review", "Read design doc then", "starts", block=0))
+
+
+class SpaceInsideHighlightTests(unittest.TestCase):
+    def test_marker_pair_around_a_line_break_keeps_a_space(self):
+        body = "<p>Say " + marker("R1", "every region") + "<br/>" + marker("R1", "before the March") + " ok</p>"
+        found = anchor_for(body, "R1", "")
+        self.assertEqual(found.text, "every region before the March")
+        self.assertEqual(found.before, "Say")
+        self.assertEqual(found.after, "ok")
+
+    def test_space_between_two_formatted_pieces_is_kept(self):
+        body = ("<p>Say <strong>" + marker("R1", "bold") + "</strong> <em>" + marker("R1", "ital")
+                + "</em> ok</p>")
+        self.assertEqual(anchor_for(body, "R1", "").text, "bold ital")
+
+    def test_only_spaces_are_filled_in_not_other_text(self):
+        # Skipped words are not spaces: the read is unchanged (glued), as before.
+        body = "<p>" + marker("R1", "alpha") + " gamma " + marker("R1", "delta") + "</p>"
+        self.assertEqual(anchor_for(body, "R1", "").text, "alphadelta")
+        body = "<p>" + marker("R1", "alpha") + "gamma" + marker("R1", "delta") + "</p>"
+        self.assertEqual(anchor_for(body, "R1", "").text, "alphadelta")
+
+    def test_one_space_not_two_when_the_piece_already_ends_with_one(self):
+        body = "<p>" + marker("R1", "alpha ") + "<br/>" + marker("R1", "beta") + "</p>"
+        self.assertEqual(anchor_for(body, "R1", "").text, "alpha beta")
+
+    def test_line_break_in_a_table_cell(self):
+        body = ("<table><tbody><tr><td>one</td><td>" + marker("R1", "first line") + "<br/>"
+                + marker("R1", "second line") + "</td></tr></tbody></table>")
+        self.assertEqual(anchor_for(body, "R1", "").text, "first line second line")
+
+    def test_wrap_then_anchor_for_round_trip_across_a_line_break(self):
+        body = "<p>Roll out to every region<br/>before the March review.</p>"
+        block = blocks(body)[0]
+        start = block.text.index("every region")
+        end = block.text.index(" review")
+        wrapped = wrap(body, block, start, end, "R1")
+        self.assertIn('ac:ref="R1"', wrapped)
+        self.assertEqual(anchor_for(wrapped, "R1", "").text, "every region before the March")
+
+    def test_wrap_then_anchor_for_round_trip_across_formatting(self):
+        body = "<p>Roll out <strong>to every</strong> <em>region</em> today.</p>"
+        block = blocks(body)[0]
+        start = block.text.index("to every")
+        end = block.text.index(" today")
+        wrapped = wrap(body, block, start, end, "R1")
+        self.assertEqual(anchor_for(wrapped, "R1", "").text, "to every region")
+        self.assertEqual(anchor_for(wrapped, "R1", "").block, 0)
 
 
 if __name__ == "__main__":

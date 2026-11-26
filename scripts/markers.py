@@ -1,7 +1,7 @@
 """Read side of inline-comment markers in a storage body."""
 from __future__ import annotations
 
-from typing import List, Optional, Set, Tuple
+from typing import Dict, List, Optional, Set, Tuple
 
 from matcher import Anchor, context_of
 from storage import Token, element_ranges, tokenize
@@ -48,14 +48,18 @@ def _cursor(starts_by_block: List[List[int]], offset: int) -> Tuple[int, int]:
     return last, len(starts_by_block[last])
 
 
-def anchor_for(body: str, ref: str, selection: str) -> Optional[Anchor]:
+def anchor_for(body: str, ref: str, selection: str,
+               link_words: Optional[Dict[str, List[str]]] = None) -> Optional[Anchor]:
     """None if no marker with ref; text = visible text inside its pieces, or selection when that is empty.
-    block = index in blocks(body) of the block holding the first visible char; -1 when there is none."""
+    block = index in blocks(body) of the block holding the first visible char; -1 when there is none.
+    link_words is passed to blocks(): cards then read as the file's link words (see visible_text.blocks).
+    Inside one block, a gap of only spaces between two chosen chars (a line break, or a space between
+    two formatted pieces) reads as one space, since a Confluence highlight is contiguous."""
     tokens = tokenize(body)
     pieces = _pieces(tokens, ref)
     if not pieces:
         return None
-    doc = blocks(body)
+    doc = blocks(body, link_words)
     texts = [block.text for block in doc]
     inner = [(low, high) for _, low, high, _ in pieces]
     chars = [(b, i) for b, block in enumerate(doc) for i, start in enumerate(block.starts)
@@ -69,6 +73,8 @@ def anchor_for(body: str, ref: str, selection: str) -> Optional[Anchor]:
         for n, (b, i) in enumerate(chars):
             if n and b != chars[n - 1][0]:
                 parts.append(" ")  # pieces in different blocks meet at one space
+            elif n and i > chars[n - 1][1] + 1 and not texts[b][chars[n - 1][1] + 1:i].strip(" "):
+                parts.append(" ")  # only spaces were skipped, so the highlight ran on through them
             parts.append(texts[b][i])
         first_block, first_index = chars[0]
         last_block, last_index = chars[-1]
