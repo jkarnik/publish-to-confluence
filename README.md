@@ -2,7 +2,7 @@
 
 ## What it does
 
-publish-to-confluence is a Claude Code skill that publishes a markdown file as a Confluence page, then updates that same page each time you publish the file again. It uploads the images your file uses, and every web link in it shows on the page as a smart-link card. Reviewers' inline comments stay attached when you republish. If someone edited the page on Confluence since your last publish, you choose whether to merge their edits into your file or overwrite them.
+publish-to-confluence is a Claude Code skill that publishes a markdown file as a Confluence page, then updates that same page each time you publish the file again. With an Atlassian API token, it also uploads the images your file uses, shows every web link as a smart-link card and keeps reviewers' inline comments attached when you republish. If someone edited the page on Confluence since your last publish, you choose whether to merge their edits into your file or overwrite them.
 
 ## What you need
 
@@ -10,7 +10,7 @@ publish-to-confluence is a Claude Code skill that publishes a markdown file as a
 - The Atlassian MCP server, connected to Claude Code. MCP is the standard way Claude Code connects to other apps, and Atlassian's MCP server lets it read and edit Confluence pages with your Atlassian account. The setup below adds the server if it's missing, and you log in once through `/mcp`.
 - Python 3 and git. Both come with Apple's command line developer tools. If Claude says git or Python 3 is missing, ask it to run `xcode-select --install`, which opens Apple's installer. When the install finishes, paste the [setup prompt](#set-it-up) again.
 - A Confluence page or folder you can add pages to.
-- Optional: an Atlassian API token, for images, cards and keeping comments attached (see [The token file](#the-token-file)).
+- Optional: an Atlassian API token, for images, cards, keeping comments attached, and republishing pages that hold images or Confluence macros (see [The token file](#the-token-file)).
 
 ## Set it up
 
@@ -132,7 +132,7 @@ Uploading images also needs permission to add attachments in the page's space.
 - With a working token, when you reword the text a comment highlights, the comment moves with it, as long as the text is still recognizable. A comment on one or two words stays only while those exact words are there. A comment comes loose when the text it highlights is deleted, reworded past recognition, or matches more than one place, so the skill can't tell where it belongs. The skill asks before any publish that would do that.
 - When you edit several look-alike list items or table rows in one publish, a comment on one of them may come loose instead of moving with the text it highlights (the skill asks first).
 - Comments stay attached when the text they highlight has bold words, code or a link in it. A comment on a link's words stays on the card that replaces them. Resolved comments stay attached too while the text they highlight is still there, and the skill never asks about them.
-- Each publish adds one version for your text to the page history, plus up to two minor versions for the skill's own changes, such as images, cards and comments.
+- Each publish adds one version for your text to the page history, plus up to two more for the skill's own changes, such as images, cards and comments.
 - Mermaid diagrams show as code.
 
 ## Updating
