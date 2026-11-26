@@ -4,7 +4,8 @@ Run just before a republish's markdown text update. In one minor edit it makes p
 make Confluence refuse that update (probe P3): embedded attachment images go back to placeholders
 and every macro that blocks it becomes plain content (flatten.make_plain: Jira issues become links,
 panels keep their text, a table of contents goes). Cards, `code` and `status` macros and mentions
-are accepted as they are, and comment markers are never touched.
+are accepted as they are, and comment markers are never touched. If a Jira issue can't become a
+link, the publish is called off, so nothing at all is saved and the exit code is 1.
 """
 from __future__ import annotations
 
@@ -115,12 +116,18 @@ def run(page_id: str, md_path: str, overwrite: bool, client) -> Tuple[Dict, int]
     body, swapped = images.to_placeholders(body, ours | referenced)
     body, counts, unresolved = flatten.make_plain(body, view)
 
+    if unresolved:
+        # Confluence would refuse the text update while a Jira issue macro stays, so the publish
+        # is called off: change nothing on the page, and report no work done.
+        return {"pageId": page_id, "version": version, "unembedded": 0,
+                "madePlain": {"jira": 0, "unresolved": unresolved},
+                "removedUnreferenced": 0}, 1
+
     out: Dict = {"pageId": page_id, "version": version, "unembedded": swapped,
                  "madePlain": dict(counts, unresolved=unresolved),
                  "removedUnreferenced": removed}
-    code = 1 if unresolved else 0
     if not (swapped or removed or any(counts.values())):
-        return out, code
+        return out, 0
 
     status, saved = client.save_body(page, body, _message(swapped, removed, counts))
     if status != 200:
@@ -134,4 +141,4 @@ def run(page_id: str, md_path: str, overwrite: bool, client) -> Tuple[Dict, int]
         out["version"] = int(saved["version"]["number"])
     except (KeyError, TypeError, ValueError):
         out["version"] = version + 1
-    return out, code
+    return out, 0
