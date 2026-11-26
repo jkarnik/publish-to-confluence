@@ -89,7 +89,7 @@ class ImagesAndCardsTests(FinishCase):
             '<a href="https://example.com/b">b</a>. The old words stay.</p>',
             md='![](pic.png)\n\nGo [a](https://example.com/a) and [b](https://example.com/b). '
                'The old words stay.\n',
-            comments=[comment("c1", "r1", "old words")],
+            comments=[comment("c1", "r1", "old words stay")],
             images={"pic.png": helpers.tiny_png()})
         out, code = s.run()
         self.assertEqual(code, 0)
@@ -383,7 +383,7 @@ class CardsAndCommentsTests(FinishCase):
         self.assertTrue(cards.CARD_WRAP_OK)
         s = self.setup('<p>Read <a href="https://example.com/guide">the setup guide</a> first.</p>',
                        md='Read [the setup guide](https://example.com/guide "block") first.\n',
-                       comments=[comment("c1", "r1", "setup guide")])
+                       comments=[comment("c1", "r1", "the setup guide")])
         out, code = s.run()
         self.assertEqual(code, 0)
         self.assertEqual(out["comments"]["reattached"], 1)

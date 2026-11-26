@@ -42,7 +42,7 @@ def comment(cid, status="open", ref=None, selection=None):
 
 PARA = comment("c1", ref="R1", selection="fox jumps over")
 CELL = comment("c2", ref="R2", selection="five attempts")
-LOOSE = comment("c3", ref=None, selection="loose highlight")
+LOOSE = comment("c3", ref=None, selection="a loose highlight")
 
 
 def run(comments, page_body=None, markdown=MARKDOWN, fail=None):
@@ -70,7 +70,7 @@ class OpenCommentTests(unittest.TestCase):
         self.assertEqual(out["open"], [
             {"id": "c1", "text": "fox jumps over", "status": "willReattach", "reason": None, "to": None},
             {"id": "c2", "text": "five attempts", "status": "willReattach", "reason": None, "to": None},
-            {"id": "c3", "text": "loose highlight", "status": "willReattach", "reason": None, "to": None},
+            {"id": "c3", "text": "a loose highlight", "status": "willReattach", "reason": None, "to": None},
         ])
 
     def test_reworded_will_move(self):
@@ -117,13 +117,29 @@ class OpenCommentTests(unittest.TestCase):
         out, code = run([LOOSE], markdown=md)
         self.assertEqual(code, 0)
         self.assertEqual(out["open"], [
-            {"id": "c3", "text": "loose highlight", "status": "staysDetached", "reason": "textGone", "to": None}])
+            {"id": "c3", "text": "a loose highlight", "status": "staysDetached", "reason": "textGone", "to": None}])
         self.assertEqual(out["willDetach"], 0)
 
     def test_no_marker_exact_will_reattach(self):
         out, _ = run([LOOSE])
         self.assertEqual(out["open"][0]["status"], "willReattach")
-        self.assertEqual(out["open"][0]["text"], "loose highlight")
+        self.assertEqual(out["open"][0]["text"], "a loose highlight")
+
+    def test_no_marker_one_word_stays_detached_and_is_not_asked_about(self):
+        # "highlight" appears once on the page, but a marker-free highlight under three
+        # words never re-attaches by itself.
+        out, code = run([comment("c3", ref=None, selection="highlight")])
+        self.assertEqual(code, 0)
+        self.assertEqual(out["open"], [
+            {"id": "c3", "text": "highlight", "status": "staysDetached", "reason": "ambiguous", "to": None}])
+        self.assertEqual(out["willDetach"], 0)
+
+    def test_no_marker_three_words_will_reattach(self):
+        out, code = run([comment("c3", ref=None, selection="loose highlight here")])
+        self.assertEqual(code, 0)
+        self.assertEqual(out["open"], [
+            {"id": "c3", "text": "loose highlight here", "status": "willReattach", "reason": None, "to": None}])
+        self.assertEqual(out["willDetach"], 0)
 
     def test_no_marker_never_moves(self):
         # Reworded, but without a marker there are no surroundings, so nothing may move.
@@ -261,10 +277,10 @@ class ResolvedCommentTests(unittest.TestCase):
         self.assertEqual(out["willDetach"], 0)
 
     def test_resolved_without_marker_uses_selection(self):
-        out, _ = run([comment("r1", status="resolved", ref=None, selection="loose highlight"),
+        out, _ = run([comment("r1", status="resolved", ref=None, selection="a loose highlight"),
                       comment("r2", status="resolved", ref=None, selection=None)])
         self.assertEqual(out["resolved"], [
-            {"id": "r1", "text": "loose highlight", "status": "willReattach"},
+            {"id": "r1", "text": "a loose highlight", "status": "willReattach"},
             {"id": "r2", "text": "", "status": "notFound"},
         ])
 
