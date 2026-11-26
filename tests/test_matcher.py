@@ -18,10 +18,10 @@ class ExactMatchTests(unittest.TestCase):
             "The collector restarted at noon.",
             "Alerts stopped syncing since the morning shift started.",
         ]
-        got = matcher.find(Anchor("stopped syncing"), texts, allow_move=False)
-        start = texts[1].index("stopped syncing")
-        self.assertEqual(got, Result("exact", 1, start, start + len("stopped syncing")))
-        self.assertEqual(texts[1][got.start:got.end], "stopped syncing")
+        got = matcher.find(Anchor("stopped syncing since"), texts, allow_move=False)
+        start = texts[1].index("stopped syncing since")
+        self.assertEqual(got, Result("exact", 1, start, start + len("stopped syncing since")))
+        self.assertEqual(texts[1][got.start:got.end], "stopped syncing since")
 
     def test_exact_twice_no_context(self):
         texts = [
@@ -93,6 +93,76 @@ class ContextOfTests(unittest.TestCase):
 
 OLD = "stopped syncing since the morning shift started"
 NEW = "stopped syncing since the early shift started"
+class ShortContextFreeTests(unittest.TestCase):
+    """A highlight with no surroundings and under MIN_MOVE_WORDS words stays loose."""
+
+    # The page a markerless comment was made on is gone from the new text; the new text
+    # has one unrelated occurrence of the highlighted word(s).
+    TEXTS = [
+        "Goals",
+        "Ship flow export in the first release.",
+        "Owner: TBD, pending staffing. Budget: two engineers.",
+    ]
+
+    def _find(self, anchor, allow_move):
+        return matcher.find(anchor, self.TEXTS, allow_move=allow_move)
+
+    def test_one_word_once_stays_loose(self):
+        for allow_move in (False, True):
+            got = self._find(Anchor("TBD"), allow_move)
+            self.assertEqual(got, Result("none", reason="ambiguous"))
+
+    def test_two_words_once_stay_loose(self):
+        for allow_move in (False, True):
+            got = self._find(Anchor("pending staffing"), allow_move)
+            self.assertEqual(got, Result("none", reason="ambiguous"))
+
+    def test_short_and_not_on_the_page_is_text_gone(self):
+        for text in ("Overdue", "no owner"):
+            for allow_move in (False, True):
+                got = self._find(Anchor(text), allow_move)
+                self.assertEqual(got, Result("none", reason="textGone"))
+
+    def test_short_with_several_matches_is_still_ambiguous(self):
+        texts = self.TEXTS + ["Owner: TBD again."]
+        got = matcher.find(Anchor("TBD"), texts, allow_move=True)
+        self.assertEqual(got, Result("none", reason="ambiguous"))
+
+    def test_punctuation_only_counts_as_no_words(self):
+        texts = ["Wait... what?", "Done."]
+        got = matcher.find(Anchor("..."), texts, allow_move=False)
+        self.assertEqual(got, Result("none", reason="ambiguous"))
+
+    def test_three_words_once_attach_as_before(self):
+        text = "flow export in"
+        start = self.TEXTS[1].index(text)
+        for allow_move in (False, True):
+            got = self._find(Anchor(text), allow_move)
+            self.assertEqual(got, Result("exact", 1, start, start + len(text)))
+
+    def test_one_word_with_surroundings_in_its_own_block_attaches(self):
+        old_texts = ["Goals", "Ship flow export in the first release.", "Owner: TBD, pending staffing."]
+        anchor = _anchor_for(old_texts, 2, "TBD")
+        self.assertTrue(anchor.before and anchor.after)
+        got = matcher.find(anchor, self.TEXTS, allow_move=True, old_texts=old_texts)
+        start = self.TEXTS[2].index("TBD")
+        self.assertEqual(got, Result("exact", 2, start, start + 3))
+
+    def test_one_word_with_surroundings_and_no_old_page_attaches(self):
+        old_texts = ["Goals", "Ship flow export in the first release.", "Owner: TBD, pending staffing."]
+        anchor = _anchor_for(old_texts, 2, "TBD")
+        got = matcher.find(Anchor(anchor.text, anchor.before, anchor.after), self.TEXTS, allow_move=False)
+        start = self.TEXTS[2].index("TBD")
+        self.assertEqual(got, Result("exact", 2, start, start + 3))
+
+    def test_two_words_with_only_one_side_of_surroundings_attach(self):
+        start = self.TEXTS[2].index("pending staffing")
+        want = Result("exact", 2, start, start + len("pending staffing"))
+        for anchor in (Anchor("pending staffing", before="Owner: TBD,"),
+                       Anchor("pending staffing", after=". Budget: two")):
+            self.assertEqual(self._find(anchor, False), want)
+
+
 LEAD = "The collector restarted at noon, then "
 TRAIL = " and nobody noticed it until Friday."
 

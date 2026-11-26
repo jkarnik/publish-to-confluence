@@ -408,12 +408,16 @@ def find(anchor: Anchor, texts: List[str], allow_move: bool,
     look-alike sibling when its own passage is deleted. alignment (from align) is computed
     from old_texts when not passed; passing it without old_texts is an error. Without
     old_texts or a block, every block is searched and moves are refused when the old
-    surroundings repeat the highlight's words.
+    surroundings repeat the highlight's words. An anchor with no surroundings at all (a
+    comment whose marker is gone) and under MIN_MOVE_WORDS words never attaches on an exact
+    match alone: none, "ambiguous" if the text is on the page, else "textGone".
     """
     if alignment is not None and old_texts is None:
         raise ValueError("alignment needs old_texts")
     if not anchor.text:
         return Result("none", reason="textGone")
+    if not (anchor.before or anchor.after) and len(_WORD.findall(anchor.text)) < MIN_MOVE_WORDS:
+        return Result("none", reason="ambiguous" if _exact_spans(anchor.text, texts) else "textGone")
     aligned = old_texts is not None and anchor.block >= 0
     target: Optional[int] = None
     if aligned:
