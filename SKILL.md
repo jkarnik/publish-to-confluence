@@ -84,20 +84,18 @@ Publish one markdown file to Confluence. The first publish creates a page under 
 - Never change the local file without the user's explicit sign-off on the merge preview.
 - Never ask the user technical questions. The exceptions are the permission questions about what a publish will lose, and the merge-or-overwrite question with its preview and clash picks.
 
-<!-- D4 appends "Confluence edits: merge or overwrite" below -->
-
 ## Confluence edits: merge or overwrite
 
-Step 5 sends a republish here when the page's version is higher than the entry's `version`. Without a working token, first run step 6's `dryRun` check. The page refuses a text update when it shows an attached image or holds a macro other than a code block or status label, such as a Jira issue or list, a panel, an expand section or a table of contents. Cards and mentions don't cause a refusal, though without a token the page's cards turn back into plain links. If the update would be refused, stop before showing any change or asking anything: say so, and say that a working API token would fix it.
+Step 5 sends a republish here when the page's version is higher than the entry's `version`. Without a working token, run step 6's `dryRun` check first; step 6 then doesn't run it again. If the page refuses the update, stop as step 6 says, before showing any change or asking anything. A page that passes shows no attached image, so without a token a merge never downloads one.
 
 ### Find the edits
 
-- Run `diffConfluenceContentVersions` (`contentId` = `pageId`, `from_version` = the entry's `version`, `to_version` = step 4's version) twice: with `content_format: "markdown"` for the text, and with `"html"` for what the markdown hides or flattens (cards, Jira issues and lists, images, mentions, status labels and panels). The html diff can put each version's whole body on a single line, so look inside those lines for the items that differ.
+- Run `diffConfluenceContentVersions` (`contentId` = `pageId`, `from_version` = the entry's `version`, `to_version` = step 4's version) twice: with `content_format: "markdown"` for the text, and with `"html"` for what the markdown hides or flattens (cards, images, mentions, Jira issues and lists, status labels, panels, expand sections, excerpts and tables of contents). The html diff can put each version's whole body on a single line, so look inside those lines for the items that differ.
 - Comment highlights never count as edits. In the html diff they're `<span class="annotation" … data-annotation-type="inlineComment">`.
 - There are no edits when `from.title` matches `to.title`, the markdown diff has `diff.empty` true, and the html diff is empty too or differs only in comment highlights. That happens when a publish that didn't finish left the script's own edits behind. Carry on with step 6 and say nothing about Confluence edits.
-- If a diff fails, for example because the entry's version can't be read anymore, compare the current page with the file instead: `getConfluenceContent` (`content_id` = `pageId`, `detail: "full"`) with `content_format` `"markdown"`, then `"html"`. Treat every difference that isn't just formatting as a possible Confluence edit, and in a merge as a clash, since there's no earlier version to show which side changed it.
-- Find who made the edits with `listConfluenceContentVersions` (`contentId` = `pageId`, `limit` = step 4's version minus the entry's, at most 250). Each result has a `number`, an `authorId` and `minorEdit`. The edits are the versions above the entry's, leaving out the current user's minor edits (`minorEdit` true): the script saves its own edits that way. If that leaves none, count them all.
-- Say "you" for the current user, whose ID is the `accountId` from `atlassianUserInfo`. Name other people: the newest version's author is in step 4's summary (`metadata.version.author.displayName`), and `getJiraUser` (`accountId` = the `authorId`) looks up anyone else. If no name comes back, say "someone else".
+- If a diff fails, for example because the entry's version can't be read anymore, compare the current page with the file instead: `getConfluenceContent` (`content_id` = `pageId`, `detail: "full"`) with `content_format` `"markdown"`, then `"html"`. Treat every difference that isn't just formatting as a possible Confluence edit, and in a merge as a clash, since there's no earlier version to show which side changed it. Leave out differences that are only formatting, such as bold or a heading level: the formatting rule under "Compare with the file" doesn't apply here.
+- Find who made the edits with `listConfluenceContentVersions` (`contentId` = `pageId`, `limit: 250`). It lists versions newest first, each with a `number`, an `authorId` and `minorEdit`. Until the results cover every version above the entry's, pass each response's next-page cursor back as `cursor`, and stop if a response has none. The edits are the versions above the entry's, leaving out the current user's minor edits (`minorEdit` true): the script saves its own edits that way. If that leaves none, count them all.
+- Say "you" for the current user, whose ID is the `accountId` from `atlassianUserInfo` (no parameters, not even `cloudId`). Name other people: the newest version's author is in step 4's summary (`metadata.version.author.displayName`), and `getJiraUser` (`accountId` = the `authorId`) looks up anyone else. If that lookup fails or isn't allowed, or gives no name, say "someone else" and carry on.
 
 ### Compare with the file
 
@@ -115,16 +113,16 @@ Find each change's passage in the file by its words, since the export writes som
 
 Ask one question with three answers: merge, overwrite or stop.
 
-- List by section what was added, deleted or changed, each with a short snippet (before → after for a change, or what a formatting edit did, such as "made bold"), and list rich items by kind: card, embedded view, Jira issue or list, image, mention, status label or panel. Say which changes the file already has, and which passages the file changed too.
+- List by section what was added, deleted or changed, each with a short snippet (before → after for a change, or what a formatting edit did, such as "made bold"), and list rich items by kind: card, embedded view, Jira issue or list, image, mention, status label, panel, expand section, excerpt or table of contents. Say which changes the file already has, and which passages the file changed too.
 - Say how many edits there were and who made them.
-- The overwrite answer says that the page will match the file and that the Confluence edits stay in the page history. It also gives the losses step 6 would ask about, worked out as step 6 does, so this one answer covers them.
+- The overwrite answer says that the page will match the file and that the Confluence edits stay in the page history. It also gives what step 6's question would, so this one answer covers it: the losses, worked out as step 6 does, and without a working token, why there's none (`tokenDetail`).
 
 ```
 This page was edited on Confluence after your last publish (7 edits, all by you):
   Title         changed   "Checkout redesign" → "Checkout redesign scope"
   Scope         changed   "…covers 12 sources…" → "…covers 9 sources…"
   Stages        deleted   3 subsections
-  Related work  added     Jira card ABC-123, an embedded video, an image, a mention
+  Related work  added     Jira card ABC-123, a Jira list, an embedded video, an image, a mention
 Your file already has the Scope and Stages changes.
 Merge the rest into your file, overwrite with your file, or stop?
   Merge: I'll show you how your file would change before changing anything.
@@ -139,7 +137,7 @@ Merge the rest into your file, overwrite with your file, or stop?
 
 ### Merge
 
-- **Clashes.** If any passage clashes, settle it first, in its own question. Show both versions of each one, the file's and Confluence's, and ask the user to pick one for each or write what they want instead. Go on only when every clash has an answer. Anything else stops the publish, and nothing has changed.
+- **Clashes.** If any passage clashes, settle it first, in its own question. Show both versions of each one, the file's and Confluence's, and ask the user to pick one for each or write what they want instead. If the answer settles only some of them, ask again about the others. Go on once every clash has an answer. An answer that settles none of them stops the publish, and nothing has changed.
 - **Propose.** Write the proposal (`<proposed>` below) to `~/.claude/publish-to-confluence/proposals/<stem>-proposed.md`, creating the folder if needed. It's the file plus the missing Confluence changes and the clash answers, in the file's own markdown style, with nothing else changed. Text, headings, lists and tables come in as markdown. A title changed on Confluence changes the file's `# ` title line, or adds one at the top if the file has none. The rest comes in like this:
 
   | On the page (html diff) | In the proposal |
@@ -152,21 +150,22 @@ Merge the rest into your file, overwrite with your file, or stop?
   | A mention: `data-type="mention"` | the name in plain text, as the markdown diff shows it: `@Alex Kim` |
   | A status label: `data-type="status"` | its text |
   | A panel: `data-type="panel-info"` and the like | a blockquote |
-  | An expand section or an excerpt | its content |
+  | An expand section or an excerpt | its title, if it has one, as a bold line, then its content |
   | A Jira list: `data-extension-key="jira"` with a `jqlQuery` | the plain text `Jira list: <JQL>` |
   | A table of contents | left out |
   | An image: `<div data-type="media" … data-id="…" data-alt="…">` | `![alt](path)`, with `data-alt` as the alt text |
   | Anything else markdown can't hold | plain text, or left out |
 
   - When Confluence changed the look of a link the file has, put the tag on the file's own link and keep its words. A link that's new from Confluence uses its URL as its text.
-  - For an image, find its attachment. `listConfluenceAttachments` (`contentId` = `pageId`) gives each attachment's `id` and `title`, which is its filename. `getConfluenceAttachment` (`attachmentId` = the `id`) gives its `fileId`, which matches the image's `data-id`.
-  - The image's path is in the folder the file's other images use, or `images/` next to the file, under the attachment's filename: `prepare` needs that name to match the image on the page. If a file of that name is already there, stop and say so; nothing has changed. It's downloaded after the sign-off, under Apply.
-- **Preview.** Run `preview-merge <file> <proposed>`, which compares the file with the proposal section by section. It prints `{"identical", "changes": [{"section", "kind", "before", "after"}]}`. Show each change under its section as a snippet: added, deleted, or changed with before → after. Then name each image to be downloaded and where it goes, what the file can't hold (each item that comes in as plain text or a blockquote, or is left out), and the losses this publish would still have, worked out as step 6 does but for the proposal: with a working token, that's `comments <pageId> <proposed>`. Then ask for sign-off.
+  - For an image, find its attachment. `listConfluenceAttachments` (`contentId` = `pageId`, `limit: 250`) gives each attachment's `id` and `title`, which is its filename; while a response has a next-page cursor, pass it back as `cursor` for the rest. `getConfluenceAttachment` (`attachmentId` = the `id`) gives its `fileId`, which matches the image's `data-id`. If no attachment matches, leave the image out, and the preview names it as something the file can't hold.
+  - The image's path is in the folder the file's other images use, or `images/` next to the file, under the attachment's filename: `prepare` needs that name to match the image on the page. In the markdown, write each space in the path as `%20`, such as `![Launch timeline](images/Launch%20timeline.png)`. If a file of that name is already there, stop and say so; nothing has changed. It's downloaded after the sign-off, under Apply.
+- **Preview.** Run `preview-merge <file> <proposed>`, which compares the file with the proposal section by section. It prints `{"identical", "changes": [{"section", "kind", "before", "after"}]}`. If it prints an `error` instead, stop and say why; nothing has changed. Show each change under its section as a snippet: added, deleted, or changed with before → after. Then name each image to be downloaded and where it goes, and each item the file can't hold and what it becomes: plain text, a blockquote, a bold title and its content, or left out. Add the losses this publish would still have, worked out as step 6 does but for the proposal: with a working token, that's `comments <pageId> <proposed>`; without one, also say why there's none (`tokenDetail`). Then ask for sign-off.
 
   ```
   If you merge, your file changes like this:
     Title          ~ changes "Checkout redesign" → "Checkout redesign scope"
     Related work   + adds    a link to ABC-123 (becomes a card)
+                   + adds    the Jira list, as the text "Jira list: project = ABC"
                    + adds    the embedded video, kept as an embed
                    + adds    the image "Rollout plan", saved as images/rollout-plan.png
                    + adds    the mention of Alex Kim, as plain text
@@ -174,6 +173,6 @@ Merge the rest into your file, overwrite with your file, or stop?
   Merge and publish?
   ```
 
-  If `identical` is true, the merge changes nothing in the file. Say so in place of the changes, say which Confluence edits this publish will take off the page, and ask whether to publish anyway. A clear yes skips Apply and carries on with step 6.
+  If `identical` is true, the merge changes nothing in the file. Say so in place of the changes, say which Confluence edits this publish will take off the page, give the losses as above, and ask whether to publish the file as it is. A clear yes skips Apply and carries on with step 6, and step 8 adds `--overwrite`.
 - **Sign-off.** Only a clear yes counts. Any other answer stops the publish, and the file and the page stay as they are.
-- **Apply.** First download each image the proposal adds to its planned path. With a working token, run `download <pageId> <filename> <dest>`, with the attachment's `title` as `<filename>` and the path as `<dest>`. Without one, run `downloadConfluenceAttachment` (`attachmentId` = the attachment's `id`, `outputPath` = the image's absolute path), then run the `downloadCommand` it returns. If a download fails, stop and say why; the file hasn't changed. Then run `apply-merge <file> <proposed>`. It backs the file up, moves the proposal into its place and prints `{"file", "backup"}`; step 9 reports the backup's path. If it prints an `error` instead, stop and say why. Otherwise the publish carries on with the merged file, as step 5 says.
+- **Apply.** First download each image the proposal adds, once per attachment: run `download <pageId> <filename> <dest>`, with the attachment's `title` as `<filename>` and the image's planned path as `<dest>`. It prints `{"pageId", "filename", "saved", "bytes"}`. Then run `apply-merge <file> <proposed>`. It backs the file up, moves the proposal into its place and prints `{"file", "backup"}`; step 9 reports the backup's path. If a download or `apply-merge` prints an `error` instead, delete the images this Apply already saved (each `saved` path), so they can't block the next merge, then stop and say why. Otherwise the publish carries on with the merged file, as step 5 says, and step 8 adds `--overwrite`.
