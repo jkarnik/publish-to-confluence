@@ -259,5 +259,103 @@ class BlockMapTests(unittest.TestCase):
         self.assertEqual(texts("just text"), ["just text"])
 
 
+class CardWordsTests(unittest.TestCase):
+    URL = "https://example.atlassian.net/wiki/x"
+    OTHER = "https://example.atlassian.net/wiki/y"
+
+    def card(self, url=None, appearance="inline"):
+        url = url or self.URL
+        return '<a href="%s" data-card-appearance="%s">%s</a>' % (url, appearance, url)
+
+    def test_card_shown_as_the_files_words(self):
+        body = "<p>See %s now</p>" % self.card()
+        result = blocks(body, {self.URL: ["design doc"]})
+        self.assertEqual([b.text for b in result], ["See design doc now"])
+        block = result[0]
+        card = self.card()
+        low = body.index(card)
+        at = block.text.index("design")
+        for i in range(at, at + len("design doc")):
+            # every shown char maps to the whole card element, so nothing can wrap inside it
+            self.assertEqual((block.starts[i], block.ends[i]), (low, low + len(card)))
+        self.assertEqual(body[block.starts[0]:block.ends[0]], "S")
+        self.assertEqual(body[block.starts[-1]:block.ends[-1]], "w")
+        self.assertEqual(len(block.starts), len(block.text))
+        self.assertEqual(len(block.ends), len(block.text))
+
+    def test_card_still_hidden_with_no_map(self):
+        body = "<p>See %s now</p>" % self.card()
+        self.assertEqual(texts(body), ["See now"])
+        self.assertEqual([b.text for b in blocks(body, None)], ["See now"])
+        self.assertEqual(blocks(body), blocks(body, None))
+
+    def test_card_hidden_when_the_file_has_no_such_link(self):
+        body = "<p>See %s now</p>" % self.card()
+        self.assertEqual([b.text for b in blocks(body, {})], ["See now"])
+        self.assertEqual([b.text for b in blocks(body, {self.OTHER: ["elsewhere"]})], ["See now"])
+
+    def test_two_cards_to_one_url_take_the_files_words_in_order(self):
+        body = "<p>%s and %s</p>" % (self.card(), self.card())
+        self.assertEqual([b.text for b in blocks(body, {self.URL: ["first words", "second words"]})],
+                         ["first words and second words"])
+
+    def test_card_beyond_the_files_links_stays_hidden(self):
+        body = "<p>%s and %s and %s</p>" % (self.card(), self.card(), self.card())
+        self.assertEqual([b.text for b in blocks(body, {self.URL: ["one", "two"]})], ["one and two and"])
+
+    def test_cards_to_different_urls_count_separately(self):
+        body = "<p>%s %s %s</p>" % (self.card(), self.card(self.OTHER), self.card())
+        words = {self.URL: ["a1", "a2"], self.OTHER: ["b1"]}
+        self.assertEqual([b.text for b in blocks(body, words)], ["a1 b1 a2"])
+
+    def test_counting_runs_across_blocks_and_appearances(self):
+        body = "<p>%s</p><p>%s</p><ul><li>%s</li></ul>" % (
+            self.card(), self.card(appearance="block"), self.card(appearance="embed"))
+        self.assertEqual([b.text for b in blocks(body, {self.URL: ["one", "two", "three"]})],
+                         ["one", "two", "three"])
+
+    def test_empty_card_tag_and_card_with_other_attributes(self):
+        body = '<p>a <a data-card-appearance="inline" href="u"/> b</p>'
+        result = blocks(body, {"u": ["words"]})
+        self.assertEqual([b.text for b in result], ["a words b"])
+        low = body.index("<a ")
+        at = result[0].text.index("words")
+        self.assertEqual((result[0].starts[at], result[0].ends[at]), (low, low + len('<a data-card-appearance="inline" href="u"/>')))
+        body = '<p>x <a href="u" data-card-appearance="embed" data-layout="wide">u</a> y</p>'
+        self.assertEqual([b.text for b in blocks(body, {"u": ["the words"]})], ["x the words y"])
+
+    def test_card_href_entities_are_decoded_to_match_the_file(self):
+        url = "https://example.atlassian.net/wiki/x?a=1&b=2"
+        body = '<p>%s</p>' % ('<a href="%s" data-card-appearance="inline">%s</a>' % (
+            url.replace("&", "&amp;"), url.replace("&", "&amp;")))
+        self.assertEqual([b.text for b in blocks(body, {url: ["with query"]})], ["with query"])
+
+    def test_card_words_are_normalized_and_whole_block_alone_is_a_block(self):
+        body = "<p>%s</p>" % self.card()
+        self.assertEqual([b.text for b in blocks(body, {self.URL: ["the  \u201cdesign\u201d doc"]})],
+                         ['the "design" doc'])
+
+    def test_other_hidden_things_are_unchanged_by_a_map(self):
+        macro = '<ac:structured-macro ac:name="code"><ac:plain-text-body>x = 1</ac:plain-text-body></ac:structured-macro>'
+        body = "<p>a %s b %s c</p>%s<p>d</p>" % (self.card(), self.card(), macro)
+        self.assertEqual([b.text for b in blocks(body, {self.URL: ["w1"]})], ["a w1 b c", "d"])
+
+    def test_a_card_inside_a_hidden_macro_is_not_counted(self):
+        macro = '<ac:structured-macro ac:name="info"><ac:rich-text-body><p>%s</p></ac:rich-text-body></ac:structured-macro>' % self.card()
+        body = "%s<p>%s</p>" % (macro, self.card())
+        self.assertEqual([b.text for b in blocks(body, {self.URL: ["the one"]})], ["the one"])
+
+    def test_marker_around_a_card_is_transparent(self):
+        marked = '<ac:inline-comment-marker ac:ref="m1">%s</ac:inline-comment-marker>' % self.card()
+        body = "<p>a %s b</p>" % marked
+        self.assertEqual([b.text for b in blocks(body, {self.URL: ["link words"]})], ["a link words b"])
+
+    def test_none_map_is_byte_identical_to_the_old_result(self):
+        body = ("<p>See %s and <a href=\"u\">link</a><br/>x</p><table><tr><td>%s</td><td>y</td></tr></table>"
+                % (self.card(), self.card(appearance="block")))
+        self.assertEqual(blocks(body, None), blocks(body))
+        self.assertEqual(blocks(body, link_words=None), blocks(body))
+
+
 if __name__ == "__main__":
     unittest.main()

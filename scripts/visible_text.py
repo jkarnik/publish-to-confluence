@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import FrozenSet, List
+from typing import Dict, FrozenSet, List, Optional
 
 from storage import Token, tokenize
 from textnorm import normalize_map
@@ -28,15 +28,22 @@ HIDDEN_TAGS: FrozenSet[str] = frozenset({
 })
 
 
-def _is_hidden(token: Token) -> bool:
-    if token.name in HIDDEN_TAGS or token.name.startswith("ri:"):
-        return True
+def _is_card(token: Token) -> bool:
     return token.name == "a" and "data-card-appearance" in token.attrs  # a smart-link card
 
 
-def blocks(body: str) -> List[Block]:
+def _is_hidden(token: Token) -> bool:
+    return token.name in HIDDEN_TAGS or token.name.startswith("ri:") or _is_card(token)
+
+
+def blocks(body: str, link_words: Optional[Dict[str, List[str]]] = None) -> List[Block]:
     """Skipped (not visible): ac:structured-macro (all), ac:plain-text-body, ac:parameter, pre, ac:image,
-    ri:*, ac:task-id, ac:task-status, time, and <a data-card-appearance=...> cards. Markers are transparent."""
+    ri:*, ac:task-id, ac:task-status, time, and <a data-card-appearance=...> cards. Markers are transparent.
+
+    link_words maps a URL to the markdown file's link texts for it, in the file's order. When it is given, the
+    k-th card with that URL (k counts from 0, in body order) shows as the k-th text instead of being hidden;
+    a card with no k-th text stays hidden. Each shown char maps to the whole card element, so nothing can be
+    wrapped inside a card. With link_words=None every card is hidden."""
     result: List[Block] = []
     raw: List[str] = []  # the current block's raw characters ...
     raw_starts: List[int] = []  # ... and, for each, the body offset where it starts
@@ -55,6 +62,25 @@ def blocks(body: str) -> List[Block]:
 
     hidden_name = ""  # name of the hidden element being skipped ("" when none)
     hidden_depth = 0  # how many of that name are open
+    cards_seen: Dict[str, int] = {}  # cards met so far, by URL (only counted when link_words is given)
+    card_words = ""  # the words to show for the card being skipped ("" when none)
+    card_start = 0  # body offset where that card starts
+
+    def show_card(token: Token) -> str:
+        """The file's words for this card, or "" when there are none (or no link_words)."""
+        if link_words is None:
+            return ""
+        url = token.attrs.get("href", "")
+        k = cards_seen.get(url, 0)
+        cards_seen[url] = k + 1
+        texts = link_words.get(url, [])
+        return texts[k] if k < len(texts) else ""
+
+    def put_card_words(words: str, start: int, end: int) -> None:
+        for ch in words:
+            raw.append(ch)
+            raw_starts.append(start)
+            raw_ends.append(end)
 
     for token in tokenize(body):
         if hidden_name:  # inside a hidden element: only look for its matching end
@@ -64,12 +90,19 @@ def blocks(body: str) -> List[Block]:
                 hidden_depth -= 1
                 if hidden_depth == 0:
                     hidden_name = ""
+                    if card_words:  # the card's words stand where its element is
+                        put_card_words(card_words, card_start, token.end)
+                        card_words = ""
             continue
         if token.kind in ("start", "end", "empty") and token.name in BLOCK_TAGS:
             close()  # <pre> is a block tag too, so it ends the block before it is skipped below
         if token.kind in ("start", "empty") and _is_hidden(token):
+            words = show_card(token) if _is_card(token) else ""
             if token.kind == "start":
                 hidden_name, hidden_depth = token.name, 1
+                card_words, card_start = words, token.start
+            elif words:
+                put_card_words(words, token.start, token.end)
         elif token.kind in ("start", "empty") and token.name == "br":
             raw.append(" ")  # one synthetic space that stands for the whole tag
             raw_starts.append(token.start)
