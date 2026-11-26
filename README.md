@@ -7,8 +7,8 @@ publish-to-confluence is a Claude Code skill that publishes a markdown file as a
 ## What you need
 
 - Claude Code on a Mac.
-- The Atlassian MCP server, connected to Claude Code. The setup below adds it with Atlassian's `claude mcp add` command if it's missing, and you log in once through `/mcp`.
-- Python 3 and git. Both come with Apple's command line developer tools. If your Mac doesn't have them, ask Claude to run `xcode-select --install`, which opens Apple's installer.
+- The Atlassian MCP server, connected to Claude Code. MCP is the standard way Claude Code connects to other apps, and Atlassian's MCP server lets it read and edit Confluence pages with your Atlassian account. The setup below adds the server if it's missing, and you log in once through `/mcp`.
+- Python 3 and git. Both come with Apple's command line developer tools. If Claude says git or Python 3 is missing, ask it to run `xcode-select --install`, which opens Apple's installer. When the install finishes, paste the [setup prompt](#set-it-up) again.
 - A Confluence page or folder you can add pages to.
 - Optional: an Atlassian API token, for images, cards and keeping comments attached (see [The token file](#the-token-file)).
 
@@ -25,12 +25,14 @@ yourself and tell me in plain words what you did.
    run git pull in it instead.
 2. Make "~/.claude/skills/publish-to-confluence" a symbolic link to that folder, so
    Claude Code loads it as a personal skill. Create "~/.claude/skills" first if needed.
-3. Check whether an Atlassian MCP server is connected to Claude Code. If none is set
-   up, add one for all my projects:
-   claude mcp add --transport http --scope user atlassian https://mcp.atlassian.com/v2/mcp
+3. Check whether the Atlassian MCP server is set up in Claude Code. If it isn't, add it
+   for all my projects:
+   claude mcp add --transport http --scope user atlassian "https://mcp.atlassian.com/v2/mcp?tools=all"
+   If it's set up but its address doesn't end in ?tools=all, change its address to the
+   one above, keeping its name and scope.
 4. If the folder has no SETUP.md, copy SETUP.example.md to SETUP.md. If its Parent:
-   line still holds the placeholder, ask me for the address of the Confluence page or
-   folder my pages should go under, and put it after "Parent:".
+   line still holds the placeholder text in parentheses, ask me for the address of the
+   Confluence page or folder my pages should go under, and replace that text with it.
 5. If the folder has no atlassian-api.env, tell me that an Atlassian API token lets the
    skill upload images, turn links into cards and keep comments attached, and ask
    whether I want to set one up now. If I do:
@@ -42,11 +44,11 @@ yourself and tell me in plain words what you did.
    - open atlassian-api.env in TextEdit, so I can paste the token after
      ATLASSIAN_API_TOKEN= and save
    Never ask me to paste the token into this chat, and never show the file's contents.
-6. Tell me to restart Claude Code, then type /mcp and log in to Atlassian if it isn't
-   logged in yet.
+6. Tell me to restart Claude Code, then type /mcp and log in to the Atlassian MCP
+   server if it isn't logged in yet.
 ```
 
-When Claude says it's done, restart Claude Code. If Atlassian isn't logged in yet, type `/mcp`, select the Atlassian server, press Enter and choose "Authenticate".
+When Claude says it's done, restart Claude Code. If the Atlassian MCP server isn't logged in yet, type `/mcp`, select it, press Enter and choose "Authenticate".
 
 ### Set it up by hand
 
@@ -65,13 +67,15 @@ Run these in Terminal. They do the same as the prompt.
    ln -sfn "$HOME/Code/Publish to Confluence" "$HOME/.claude/skills/publish-to-confluence"
    ```
 
-3. Run `claude mcp list`. If it lists no Atlassian server, add one:
+3. Run `claude mcp list`. If it lists no server with an `https://mcp.atlassian.com` address, add the Atlassian MCP server:
 
    ```sh
-   claude mcp add --transport http --scope user atlassian https://mcp.atlassian.com/v2/mcp
+   claude mcp add --transport http --scope user atlassian "https://mcp.atlassian.com/v2/mcp?tools=all"
    ```
 
-4. Make your SETUP.md. When it opens in TextEdit, paste your page or folder address after `Parent:` and save.
+   The `?tools=all` ending makes the server offer all its tools, including the page history and comment tools the skill uses. If the list shows the server with an address that doesn't end that way, run `claude mcp remove atlassian` (with the name the list shows, if it isn't `atlassian`), then the command above.
+
+4. Make your SETUP.md. When it opens in TextEdit, replace the text in parentheses after `Parent:` with your page or folder address, so the line reads like `Parent: https://example.atlassian.net/wiki/spaces/ABC/pages/123456/Product+notes`, and save.
 
    ```sh
    cp -n "$HOME/Code/Publish to Confluence/SETUP.example.md" "$HOME/Code/Publish to Confluence/SETUP.md"
@@ -86,7 +90,7 @@ Run these in Terminal. They do the same as the prompt.
    open -e "$HOME/Code/Publish to Confluence/atlassian-api.env"
    ```
 
-6. Restart Claude Code, and log in to Atlassian through `/mcp` as described after the prompt.
+6. Restart Claude Code, and log in to the Atlassian MCP server through `/mcp` as described after the prompt.
 
 ## Publish a document
 
@@ -105,7 +109,7 @@ An Atlassian API token lets the skill upload your images, turn links into cards 
 To create a token:
 
 1. Open https://id.atlassian.com/manage-profile/security/api-tokens, the API tokens page under Security in your Atlassian account settings. Atlassian may email you a one-time code to confirm it's you.
-2. Select "Create API token", not "Create API token with scopes". A token with scopes works only through api.atlassian.com, and the skill uses your own site's address.
+2. Select "Create API token", not "Create API token with scopes": the skill can't use a token with scopes.
 3. Give it a name, pick an expiry date (a year at most) and select "Create".
 4. Select "Copy to clipboard". Atlassian won't show the token again.
 5. Fill in both lines of `atlassian-api.env`, your Atlassian login email and the token, without spaces or quotes:
@@ -115,7 +119,7 @@ To create a token:
    ATLASSIAN_API_TOKEN=your-token
    ```
 
-Without a working token, your text still publishes through the Atlassian MCP server, but the skill asks before every publish and says what that publish will lose. A page that already has images or cards from an earlier publish can't be republished without the token. <!-- probe: P3 -->
+Without a working token, your text still publishes through the Atlassian MCP server, but the skill asks before every publish and says what that publish will lose. A page can't be republished without the token if it holds images, or if someone added an info panel or any other panel, an expand section, an excerpt, a table of contents, or a Jira issue or Jira list with Confluence's Jira macro. The skill says so before changing anything. A page with cards from an earlier publish still republishes, and its cards turn back into plain links.
 
 Uploading images also needs permission to add attachments in the page's space.
 
@@ -123,10 +127,12 @@ Uploading images also needs permission to add attachments in the page's space.
 
 - Before each republish, the skill checks the page for edits made on Confluence since your last publish. It shows any it finds section by section, then asks whether to merge them into your file, overwrite them with your file, or stop.
 - A merge shows exactly how your file will change and waits for your yes. It keeps a copy of your old file.
-- To keep your own words on a link instead of a card, add "plain" after the address: `[the epic](https://example.atlassian.net/browse/ABC-123 "plain")`. Write "block" there for a bigger card, or "embed" for an embedded view. When you merge, a card look someone set on Confluence comes back into your file the same way. <!-- probe: P5 -->
-- Comments move with text you reword, as long as the passage is still recognizable. A comment on one or two words stays only while those exact words are there. Comments on text you delete come loose, and the skill asks before publishing.
-- Comments stay attached when their highlighted words include bold text, code or a link. <!-- probe: P1 --> A comment on a link's words stays on the card that replaces them. <!-- probe: P4 --> Resolved comments stay attached too, and the skill doesn't ask about them. <!-- probe: P2 -->
-- Each publish adds a few minor versions to the page history.
+- With a working token, the skill turns panels, Jira macros and the like that someone added on Confluence into plain content before republishing, since Confluence won't take the update otherwise. A merge brings their content into your file: a panel as a quote, an expand section or an excerpt as its content, a Jira issue as a link that becomes a card, and a Jira list as a line like `Jira list: project = ABC`. It leaves out a table of contents, and the merge preview names each one.
+- To keep your own words on a link instead of a card, add "plain" after the address: `[the epic](https://example.atlassian.net/browse/ABC-123 "plain")`. Write "block" there for a bigger card, or "embed" for an embedded view. If someone changes a link's look on Confluence, a merge writes the matching word after that link's address in your file ("plain", "block", "embed", or "embed wide" for a wide embedded view), so later publishes keep that look. Without a working token, links stay plain whatever you write there, and the word shows when someone hovers over the link.
+- With a working token, when you reword the text a comment highlights, the comment moves with it, as long as the text is still recognizable. A comment on one or two words stays only while those exact words are there. A comment comes loose when the text it highlights is deleted, reworded past recognition, or matches more than one place, so the skill can't tell where it belongs. The skill asks before any publish that would do that.
+- When you edit several look-alike list items or table rows in one publish, a comment on one of them may come loose instead of moving with the text it highlights (the skill asks first).
+- Comments stay attached when the text they highlight has bold words, code or a link in it. A comment on a link's words stays on the card that replaces them. Resolved comments stay attached too while the text they highlight is still there, and the skill never asks about them.
+- Each publish adds one version for your text to the page history, plus up to two minor versions for the skill's own changes, such as images, cards and comments.
 - Mermaid diagrams show as code.
 
 ## Updating
@@ -141,8 +147,8 @@ git -C "$HOME/Code/Publish to Confluence" pull
 
 | What you see | What to do |
 |---|---|
-| The skill says the token was rejected (401) | The token expired, was revoked or was mistyped. Create a new token as [The token file](#the-token-file) describes, then ask Claude to open `~/Code/Publish to Confluence/atlassian-api.env` in TextEdit. Paste the token after `ATLASSIAN_API_TOKEN=` and save. Never paste it into the chat. |
+| The skill says the token was rejected (401) | The token expired, was revoked or was mistyped. Create a new token as [The token file](#the-token-file) describes, then ask Claude to open `~/Code/Publish to Confluence/atlassian-api.env` in TextEdit. Replace the old token after `ATLASSIAN_API_TOKEN=` with the new one and save. Never paste it into the chat. |
 | An image upload fails with a 403 | You don't have permission to add attachments in that space. Ask a space admin for it. |
-| Claude can't reach Confluence | The Atlassian MCP server isn't connected, or needs you to log in again. Type `/mcp` and log in to the Atlassian server. If `/mcp` doesn't list one, paste the [setup prompt](#set-it-up) again; it adds the server and keeps your settings. |
-| The skill says your organization blocks API tokens | Your text still publishes through the MCP server, and the skill asks before each publish, as it does without a token. |
-| You want your old file back after a merge | It's in `~/.claude/publish-to-confluence/backups/`, named after your file plus the date and time (UTC) of the merge. |
+| Claude can't reach Confluence | The Atlassian MCP server isn't connected, or needs you to log in again. Type `/mcp`, select the Atlassian MCP server and log in. If `/mcp` doesn't list it, paste the [setup prompt](#set-it-up) again; it adds the server and keeps your settings. |
+| The skill says your organization blocks API tokens | Your text still publishes through the Atlassian MCP server, with the limits [The token file](#the-token-file) describes, and the skill asks before each publish. For images, cards and keeping comments attached, ask your Atlassian admin whether API tokens can be allowed for you. |
+| You want your old file back after a merge | It's in `~/.claude/publish-to-confluence/backups/`, named after your file plus the date and time (UTC) of the merge. Finder hides that folder, so ask Claude to open it, or press Shift-Command-G in Finder and paste the folder's path. |

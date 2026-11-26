@@ -2,15 +2,16 @@
 
 Run just before a republish's markdown text update. In one minor edit it makes plain what would
 make Confluence refuse that update (probe P3): embedded attachment images go back to placeholders
-and Jira issue macros become links. Cards, status macros and mentions are accepted as they are,
-and comment markers are never touched.
+and every macro that blocks it becomes plain content (flatten.make_plain: Jira issues become links,
+panels keep their text, a table of contents goes). Cards, `code` and `status` macros and mentions
+are accepted as they are, and comment markers are never touched.
 """
 from __future__ import annotations
 
 import os
 from typing import Dict, List, Tuple
 
-import cards
+import flatten
 import images
 import markdown_doc
 
@@ -40,17 +41,45 @@ def _count(n: int, one: str, many: str) -> str:
     return "%d %s" % (n, one if n == 1 else many)
 
 
-def _message(swapped: int, removed: int, jira: int) -> str:
+# How each macro kind reads in the save message: (one, many). Others read "<name> macro(s)".
+_KINDS = {
+    "jiraList": ("Jira list", "Jira lists"),
+    "info": ("info panel", "info panels"),
+    "note": ("note panel", "note panels"),
+    "tip": ("tip panel", "tip panels"),
+    "warning": ("warning panel", "warning panels"),
+    "panel": ("panel", "panels"),
+    "expand": ("expand section", "expand sections"),
+    "toc": ("table of contents", "tables of contents"),
+    "children": ("child page list", "child page lists"),
+    "excerpt": ("excerpt", "excerpts"),
+}
+
+
+def _kind(name: str, n: int) -> str:
+    one, many = _KINDS.get(name, (name + " macro", name + " macros"))
+    return _count(n, one, many)
+
+
+def _join(parts: List[str]) -> str:
+    return parts[0] if len(parts) == 1 else ", ".join(parts[:-1]) + " and " + parts[-1]
+
+
+def _message(swapped: int, removed: int, counts: Dict[str, int]) -> str:
     parts: List[str] = []
     if swapped:
         parts.append("swap %s for %s" % (_count(swapped, "image", "images"),
                                          "a placeholder" if swapped == 1 else "placeholders"))
     if removed:
         parts.append("remove %s" % _count(removed, "unreferenced image", "unreferenced images"))
+    jira = counts.get("jira", 0)
     if jira:
-        parts.append("make 1 Jira issue a link" if jira == 1
-                     else "make %d Jira issues links" % jira)
-    text = parts[0] if len(parts) == 1 else ", ".join(parts[:-1]) + " and " + parts[-1]
+        parts.append("turn %s into %s" % (_count(jira, "Jira issue", "Jira issues"),
+                                          "a link" if jira == 1 else "links"))
+    others = [_kind(name, n) for name, n in sorted(counts.items()) if name != "jira" and n]
+    if others:
+        parts.append("make %s plain" % _join(others))
+    text = _join(parts)
     return text[:1].upper() + text[1:] + " before republishing"
 
 
@@ -84,16 +113,16 @@ def run(page_id: str, md_path: str, overwrite: bool, client) -> Tuple[Dict, int]
     if overwrite:
         body, removed = images.remove_embeds(body, referenced)
     body, swapped = images.to_placeholders(body, ours | referenced)
-    body, jira, unresolved = cards.jira_macros_to_links(body, view)
+    body, counts, unresolved = flatten.make_plain(body, view)
 
     out: Dict = {"pageId": page_id, "version": version, "unembedded": swapped,
-                 "madePlain": {"jira": jira, "unresolved": unresolved},
+                 "madePlain": dict(counts, unresolved=unresolved),
                  "removedUnreferenced": removed}
     code = 1 if unresolved else 0
-    if not (swapped or removed or jira):
+    if not (swapped or removed or any(counts.values())):
         return out, code
 
-    status, saved = client.save_body(page, body, _message(swapped, removed, jira))
+    status, saved = client.save_body(page, body, _message(swapped, removed, counts))
     if status != 200:
         # Nothing was changed on the page, so no counts of work done.
         out.update({"unembedded": 0, "madePlain": {"jira": 0, "unresolved": unresolved},

@@ -5,6 +5,7 @@ import difflib
 import re
 from collections import Counter
 from dataclasses import dataclass
+from functools import lru_cache
 from typing import List, Optional, Tuple
 
 CONTEXT = 32
@@ -12,6 +13,14 @@ MIN_WORDS = 0.5
 MIN_CONTEXT = 0.7
 MARGIN = 0.15
 MIN_MOVE_WORDS = 3
+# Without the old page, surroundings that already hold this many of the highlight's own
+# words can't tell look-alike passages apart (a deleted list item's sibling slides in).
+REPEAT_WORDS = 2
+# Pairing old and new blocks left unmatched, by similarity (see align).
+MAX_PAIRS = 10000  # more unmatched old x new pairs than this: none of them is paired
+PAIR_MARGIN = 0.05  # a pair must beat every rival sharing a block with it by this much
+MIN_PAIR_RATIO = 0.5
+CHAR_RATIO_LIMIT = 150  # blocks up to this many characters each compare by character
 # A moved run may not start or end on one of these (they may sit inside it).
 STOPWORDS = frozenset(
     "a an the of to in on at by for with and or but is are was were be it its this that as from".split()
@@ -23,6 +32,7 @@ class Anchor:
     text: str  # all normalized
     before: str = ""
     after: str = ""
+    block: int = -1  # index of the anchor's block in the OLD page's blocks; -1 = unknown
 
 
 @dataclass(frozen=True)
@@ -124,11 +134,14 @@ def _runs_in_block(words: List[Tuple[str, int, int]], highlight: List[str],
                 elif row[j - 1] > above:
                     row[j] = row[j - 1]
                 diag = above
+            lcs = row[n]
+            extra = (last - first + 1) - lcs
+            if extra > max_extra:
+                break  # a longer run never has fewer extra words
             if run_word not in edge_words:
                 continue
-            lcs = row[n]
             score = lcs / n
-            if score >= MIN_WORDS and (last - first + 1) - lcs <= max_extra:
+            if score >= MIN_WORDS:
                 found.append((score, first, last))
     return found
 
@@ -143,8 +156,12 @@ def _context_upper_bound(anchor: Anchor, before: str, after: str) -> float:
     return sum(bounds) / len(bounds) if bounds else 0.0
 
 
-def _find_moved(anchor: Anchor, texts: List[str]) -> Optional[Result]:
-    """Match the highlight after its passage was reworded.
+def _find_moved(anchor: Anchor, texts: List[str], only_block: Optional[int] = None,
+                repeat_guard: bool = True) -> Optional[Result]:
+    """Match the highlight after its passage was reworded, in only_block if given.
+
+    repeat_guard refuses the move when the anchor's old surroundings hold REPEAT_WORDS of
+    the highlight's own non-stopword words; find turns it off when the old page is known.
 
     Returns a Result("moved", ...), Result("none", reason="ambiguous"), or None when
     nothing qualifies (the caller reports textGone).
@@ -157,10 +174,15 @@ def _find_moved(anchor: Anchor, texts: List[str]) -> Optional[Result]:
         return None
     highlight_set = frozenset(highlight)
     edge_words = highlight_set - STOPWORDS
+    if repeat_guard:
+        around = {w.lower() for w in _WORD.findall(anchor.before + " " + anchor.after)}
+        if len(around & edge_words) >= REPEAT_WORDS:
+            return None
     highlight_count = Counter(highlight)
     candidates = []  # (score, block, start, end)
-    for block, text in enumerate(texts):
-        words = _words(text)
+    blocks = range(len(texts)) if only_block is None else [only_block]
+    for block in blocks:
+        words = _words(texts[block])
         in_block = Counter(w for w, _, _ in words if w in highlight_set)
         shared = sum(min(count, highlight_count[w]) for w, count in in_block.items())
         if shared < MIN_WORDS * n:  # LCS can't exceed the shared words
@@ -187,14 +209,225 @@ def _find_moved(anchor: Anchor, texts: List[str]) -> Optional[Result]:
     return Result("moved", block, start, end)
 
 
-def find(anchor: Anchor, texts: List[str], allow_move: bool) -> Result:
+@lru_cache(maxsize=4096)
+def _tokens(text: str) -> Tuple[str, ...]:
+    return tuple(w.lower() for w in _WORD.findall(text))
+
+
+def _pair_sequences(old: str, new: str):
+    """What two blocks are compared as: their characters, or their words when either is long.
+
+    Blocks up to CHAR_RATIO_LIMIT characters each are compared character by character;
+    longer ones word by word, because a character ratio costs about a millisecond per
+    300-character pair and adds up to seconds over a big replaced region.
+    """
+    if len(old) > CHAR_RATIO_LIMIT or len(new) > CHAR_RATIO_LIMIT:
+        words_old, words_new = _tokens(old), _tokens(new)
+        if words_old and words_new:
+            return words_old, words_new
+    return old, new
+
+
+@lru_cache(maxsize=4096)
+def _counts(sequence) -> Counter:
+    return Counter(sequence)
+
+
+def _ratio_bound(old: str, new: str) -> float:
+    """difflib's quick_ratio for the pair (an upper bound on its ratio), from cached counts."""
+    first, second = _pair_sequences(old, new)
+    total = len(first) + len(second)
+    if not total:
+        return 1.0
+    small, large = sorted((_counts(first), _counts(second)), key=len)
+    return 2.0 * sum(min(count, large[item]) for item, count in small.items()) / total
+
+
+def _pair_ratio(old: str, new: str, floor: float = MIN_PAIR_RATIO) -> float:
+    """difflib ratio of two blocks, or 0.0 when a cheap upper bound is already under floor.
+
+    See _pair_sequences for characters or words. autojunk is off because, with it on,
+    difflib treats common characters as junk once a block passes 200 characters and the
+    ratio of a lightly reworded paragraph collapses.
+    """
+    first, second = _pair_sequences(old, new)
+    sequence = difflib.SequenceMatcher(None, first, second, autojunk=False)
+    if sequence.real_quick_ratio() < floor or sequence.quick_ratio() < floor:
+        return 0.0
+    return sequence.ratio()
+
+
+def _pair_identical(old_texts: List[str], texts: List[str], mapping: List[Optional[int]],
+                    taken: set) -> None:
+    """Pair unmatched old and new blocks with identical text that is unique on both sides."""
+    old_at: dict = {}
+    for i, text in enumerate(old_texts):
+        if mapping[i] is None:
+            old_at.setdefault(text, []).append(i)
+    new_at: dict = {}
+    for j, text in enumerate(texts):
+        if j not in taken:
+            new_at.setdefault(text, []).append(j)
+    for text, olds in old_at.items():
+        news = new_at.get(text, [])
+        if len(olds) == 1 and len(news) == 1:
+            mapping[olds[0]] = news[0]
+            taken.add(news[0])
+
+
+def _best_other(top: List[Tuple[float, int]], other: int) -> float:
+    """The highest ratio in top (a block's two best pairs) that is not with block other."""
+    return max((ratio for ratio, block in top if block != other), default=0.0)
+
+
+def _pair_by_ratio(old_texts: List[str], texts: List[str], mapping: List[Optional[int]],
+                   taken: set, region_of_old: dict, region_of_new: dict) -> None:
+    """Pair still-unmatched old and new blocks by difflib ratio, inside one replaced region.
+
+    Every unmatched old block on the page is a rival for every unmatched new block, whether
+    difflib put it in the same replaced region, another one, or a deleted or inserted run.
+    But a pair is only made when both blocks sit in the same replaced region (the region_of
+    maps): a block deleted in one place and a look-alike added in another can't be told
+    apart from one block moved and edited, so neither pairs and their comments detach.
+    """
+    olds = [i for i, new_block in enumerate(mapping) if new_block is None]
+    news = [j for j in range(len(texts)) if j not in taken]
+    if not olds or not news or len(olds) * len(news) > MAX_PAIRS:
+        return  # too many pairs to score: they all stay unpaired
+    # A pair is accepted at MIN_PAIR_RATIO or more, so only rivals within PAIR_MARGIN of
+    # that can stop one; anything lower counts as no rival.
+    floor = MIN_PAIR_RATIO - PAIR_MARGIN
+    bounds = []
+    for i in olds:
+        for j in news:
+            bound = _ratio_bound(old_texts[i], texts[j])
+            if bound >= floor:
+                bounds.append((bound, i, j))
+    # Exact ratios cost far more than bounds, so they are worked out highest bound first,
+    # and only for pairs that matter. A pair whose bound is PAIR_MARGIN or more below the
+    # best exact ratio already found for its old block, and for its new block, can neither
+    # pair nor stop the pairing of anything, so skipping it changes no result.
+    bounds.sort(key=lambda item: -item[0])
+    top_of_old: dict = {}  # block -> its two best (ratio, other block) so far, best first
+    top_of_new: dict = {}
+    ratios = {}
+    for bound, i, j in bounds:
+        top_old, top_new = top_of_old.setdefault(i, []), top_of_new.setdefault(j, [])
+        if (top_old and top_old[0][0] - bound >= PAIR_MARGIN
+                and top_new and top_new[0][0] - bound >= PAIR_MARGIN):
+            continue
+        ratio = _pair_ratio(old_texts[i], texts[j], floor)
+        if ratio < floor:
+            continue
+        ratios[(i, j)] = ratio
+        for top, other in ((top_old, j), (top_new, i)):
+            top.append((ratio, other))
+            top.sort(reverse=True)
+            del top[2:]
+    for (i, j), ratio in ratios.items():
+        region = region_of_old.get(i)
+        if ratio < MIN_PAIR_RATIO or region is None or region != region_of_new.get(j):
+            continue
+        rival = max(_best_other(top_of_old[i], j), _best_other(top_of_new[j], i))
+        # Ties and near-ties stay unpaired. A pair that beats all its rivals by the margin
+        # is the only accepted pair for both of its blocks.
+        if ratio - rival >= PAIR_MARGIN:
+            mapping[i] = j
+            taken.add(j)
+
+
+def align(old_texts: List[str], texts: List[str]) -> List[Optional[int]]:
+    """For each old block, the index of the new block that replaced it, or None.
+
+    Unchanged blocks line up through difflib's opcodes. Among the rest, blocks whose text
+    is identical and unique on both sides pair first. Then every still-unmatched old block
+    is compared with every still-unmatched new block on the page: a pair needs ratio >= 0.5,
+    has to beat every other pair sharing its old or its new block by PAIR_MARGIN (so ties
+    and near-ties stay unpaired), and both blocks must sit in the same replaced region.
+    With more than MAX_PAIRS such pairs, none is scored and none is paired. Deleted and
+    unpaired old blocks map to None.
+    """
+    mapping: List[Optional[int]] = [None] * len(old_texts)
+    taken: set = set()
+    region_of_old: dict = {}  # block -> number of the replaced region (opcode) it sits in
+    region_of_new: dict = {}
+    opcodes = difflib.SequenceMatcher(None, old_texts, texts, autojunk=False).get_opcodes()
+    for region, (tag, i1, i2, j1, j2) in enumerate(opcodes):
+        if tag == "equal":
+            for offset in range(i2 - i1):
+                mapping[i1 + offset] = j1 + offset
+                taken.add(j1 + offset)
+        elif tag == "replace":
+            region_of_old.update((i, region) for i in range(i1, i2))
+            region_of_new.update((j, region) for j in range(j1, j2))
+    _pair_identical(old_texts, texts, mapping, taken)
+    _pair_by_ratio(old_texts, texts, mapping, taken, region_of_old, region_of_new)
+    return mapping
+
+
+def _claimed_by_other_block(anchor: Anchor, texts: List[str], old_texts: List[str],
+                            alignment: List[Optional[int]], block: int) -> bool:
+    """True when texts[block] stands in for a different old block than the anchor's own.
+
+    That is the block's aligned old block, or an unpaired old block it resembles (ratio
+    >= 0.5), which align left unpaired only because it could not tell two candidates apart.
+    """
+    for old_block, new_block in enumerate(alignment):
+        if old_block == anchor.block:
+            continue
+        if new_block == block:
+            return True
+        if new_block is None and _pair_ratio(old_texts[old_block], texts[block]) >= MIN_PAIR_RATIO:
+            return True
+    return False
+
+
+def _pick_exact_aligned(anchor: Anchor, texts: List[str], old_texts: List[str],
+                        spans: List[Tuple[int, int, int]], target: Optional[int],
+                        alignment: List[Optional[int]]) -> Result:
+    """Exact matches when the old page is known: stay in the block that replaced the anchor's own."""
+    in_target = [span for span in spans if span[0] == target]
+    if in_target:
+        return _pick_exact(anchor, texts, in_target)
+    # Not in its own block: a passage that is unique before and after may have moved, but
+    # not into a block that replaced some other old block.
+    if len(spans) == 1 and len(_exact_spans(anchor.text, old_texts)) == 1:
+        block, start, end = spans[0]
+        if not _claimed_by_other_block(anchor, texts, old_texts, alignment, block):
+            return Result("exact", block, start, end)
+    return Result("none", reason="ambiguous")
+
+
+def find(anchor: Anchor, texts: List[str], allow_move: bool,
+         old_texts: Optional[List[str]] = None,
+         alignment: Optional[List[Optional[int]]] = None) -> Result:
+    """Find the anchor in texts.
+
+    Given old_texts (the page the comment was made on) and anchor.block >= 0, matches stay
+    inside the block that replaced the anchor's own block, so a comment can't slide onto a
+    look-alike sibling when its own passage is deleted. alignment (from align) is computed
+    from old_texts when not passed; passing it without old_texts is an error. Without
+    old_texts or a block, every block is searched and moves are refused when the old
+    surroundings repeat the highlight's words.
+    """
+    if alignment is not None and old_texts is None:
+        raise ValueError("alignment needs old_texts")
     if not anchor.text:
         return Result("none", reason="textGone")
+    aligned = old_texts is not None and anchor.block >= 0
+    target: Optional[int] = None
+    if aligned:
+        if alignment is None:
+            alignment = align(old_texts, texts)
+        if anchor.block < len(alignment):
+            target = alignment[anchor.block]
     spans = _exact_spans(anchor.text, texts)
     if spans:
+        if aligned:
+            return _pick_exact_aligned(anchor, texts, old_texts, spans, target, alignment)
         return _pick_exact(anchor, texts, spans)
-    if allow_move:
-        moved = _find_moved(anchor, texts)
+    if allow_move and (target is not None or not aligned):
+        moved = _find_moved(anchor, texts, target, repeat_guard=not aligned)
         if moved is not None:
             return moved
     return Result("none", reason="textGone")
