@@ -27,7 +27,8 @@ def comment(cid, ref, selection, status="open"):
 class Setup:
     """A temp folder with the markdown file, plus a FakeClient holding the page."""
 
-    def __init__(self, body, md="", before=None, comments=None, fail=None, version=5, images=None):
+    def __init__(self, body, md="", before=None, comments=None, fail=None, version=5, images=None,
+                 attachments=None):
         self.dir = helpers.TempDir()
         self.folder = self.dir.__enter__()
         for name, data in (images or {}).items():
@@ -41,6 +42,7 @@ class Setup:
             pages={PAGE: helpers.page(body, version=version)},
             versions=versions,
             comments={PAGE: comments or []},
+            attachments=None if attachments is None else {PAGE: attachments},
             fail=fail,
         )
 
@@ -445,6 +447,123 @@ class ExitCodeTests(FinishCase):
         self.assertEqual(code, 1)
         self.assertIn("500", out["error"])
         self.assertEqual(s.client.saves, [])
+
+
+class EditedDuringPublishTests(FinishCase):
+    """`--before N`: after a text update the page is at N + 1; anything higher is someone's edit."""
+
+    BODY = '<p>Their edit.</p><p><img src="pic.png" alt="Alt" /></p>'
+    MD = "Their edit.\n\n![Alt](pic.png)\n"
+
+    def _run(self, version, before=5):
+        s = self.setup(self.BODY, md=self.MD, version=version, images={"pic.png": helpers.tiny_png()})
+        out, code = s.run(before=before)
+        return s, out, code
+
+    def test_page_two_above_before_is_flagged_and_still_saved(self):
+        s, out, code = self._run(version=7)
+        self.assertEqual(code, 0)
+        self.assertIs(out["editedDuringPublish"], True)
+        self.assertEqual(len(s.client.saves), 1)
+        self.assertIn("<p>Their edit.</p>", s.saved_body())
+        self.assertIn('ri:filename="pic.png"', s.saved_body())
+        self.assertEqual(out["version"], 8)
+        self.assertEqual(out["embedded"], 1)
+
+    def test_page_one_above_before_has_no_key(self):
+        s, out, code = self._run(version=6)
+        self.assertEqual(code, 0)
+        self.assertNotIn("editedDuringPublish", out)
+        self.assertEqual(out["version"], 7)
+
+    def test_no_key_without_before(self):
+        s, out, code = self._run(version=7, before=None)
+        self.assertNotIn("editedDuringPublish", out)
+
+    def test_flag_shows_even_when_nothing_is_saved(self):
+        s = self.setup('<p>Their edit.</p>', md="Their edit.\n", version=9)
+        out, code = s.run(before=5)
+        self.assertIs(out["editedDuringPublish"], True)
+        self.assertEqual(s.client.saves, [])
+        self.assertEqual(out["version"], 9)
+
+
+class ConflictMessageTests(FinishCase):
+    def test_409_does_not_say_to_run_finish_again(self):
+        s = self.setup('<p>See <a href="https://example.com/a">a</a>.</p>',
+                       md="See [a](https://example.com/a).\n", fail={"save_body": (409, "conflict")})
+        out, code = s.run()
+        self.assertEqual(code, 1)
+        self.assertEqual(out["error"],
+                         "couldn't save the page (HTTP 409); the page changed during the publish, "
+                         "so publishing again will show what changed")
+        self.assertNotIn("finish", out["error"])
+
+    def test_other_save_failures_have_no_hint(self):
+        s = self.setup('<p>See <a href="https://example.com/a">a</a>.</p>',
+                       md="See [a](https://example.com/a).\n", fail={"save_body": (500, "boom")})
+        out, code = s.run()
+        self.assertEqual(out["error"], "couldn't save the page (HTTP 500)")
+
+
+class CalledOffPublishTests(FinishCase):
+    """`--before N` with the page still at N: no text update landed, so put every image back."""
+
+    OLD_PAGE = '<p><img src="old.png" alt="Old one" /></p><p>Text.</p>'
+
+    def test_restores_an_image_the_file_dropped_and_strips_nothing(self):
+        s = self.setup(self.OLD_PAGE, md="Text.\n", version=5, attachments={"old.png": "sha256:aaa"})
+        out, code = s.run(before=5)
+        self.assertEqual(code, 0)
+        self.assertEqual(out["stripped"], [])
+        self.assertEqual(out["embedded"], 1)
+        self.assertNotIn("editedDuringPublish", out)
+        body = s.saved_body()
+        self.assertNotIn("<img", body)
+        self.assertIn('ri:filename="old.png"', body)
+        self.assertIn('ac:alt="Old one"', body)
+        self.assertIn('ac:align="center"', body)
+        self.assertIn("<p>Text.</p>", body)
+
+    def test_a_changed_image_that_fails_to_upload_is_restored_not_stripped(self):
+        s = self.setup('<p><img src="pic.png" alt="Alt" /></p>', md="![Alt](pic.png)\n", version=5,
+                       images={"pic.png": helpers.tiny_png()}, attachments={"pic.png": "sha256:old"},
+                       fail={"upload": (500, "boom")})
+        out, code = s.run(before=5)
+        self.assertEqual(code, 1)
+        self.assertEqual(len(out["failed"]), 1)
+        self.assertEqual(out["stripped"], [])
+        self.assertIn('ri:filename="pic.png"', s.saved_body())
+        self.assertNotIn("<img", s.saved_body())
+
+    def test_a_file_that_is_gone_locally_is_restored_not_stripped(self):
+        s = self.setup('<p><img src="pic.png" alt="Alt" /></p>', md="![Alt](pic.png)\n", version=5,
+                       attachments={"pic.png": "sha256:old"})
+        out, code = s.run(before=5)
+        self.assertEqual(code, 1)
+        self.assertEqual(out["missingLocally"], ["pic.png"])
+        self.assertEqual(out["stripped"], [])
+        self.assertIn('ri:filename="pic.png"', s.saved_body())
+
+    def test_an_image_that_is_not_ours_stays_a_placeholder(self):
+        body = '<p><img src="theirs.png" alt="" /></p><p><img src="old.png" alt="" /></p>'
+        s = self.setup(body, md="Text.\n", version=5,
+                       attachments={"theirs.png": "added by hand", "old.png": "sha256:aaa"})
+        out, code = s.run(before=5)
+        self.assertIn('<img src="theirs.png" alt="" />', s.saved_body())
+        self.assertIn('ri:filename="old.png"', s.saved_body())
+
+    def test_after_a_text_update_leftovers_are_left_alone(self):
+        s = self.setup(self.OLD_PAGE, md="Text.\n", version=6, attachments={"old.png": "sha256:aaa"})
+        out, code = s.run(before=5)
+        self.assertEqual(s.client.saves, [])
+        self.assertEqual(out["embedded"], 0)
+
+    def test_without_before_leftovers_are_left_alone(self):
+        s = self.setup(self.OLD_PAGE, md="Text.\n", version=5, attachments={"old.png": "sha256:aaa"})
+        out, code = s.run()
+        self.assertEqual(s.client.saves, [])
+        self.assertEqual(out["embedded"], 0)
 
 
 if __name__ == "__main__":

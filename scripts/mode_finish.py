@@ -9,6 +9,13 @@ It runs after every text update and makes one minor edit. In order:
 4. turn web links into smart-link cards;
 5. save once, only if the body changed.
 
+`--before N` is the page version just before the text update, so a successful update leaves the
+page at N + 1. If the page is higher when it is first read, someone edited it in between: the work
+still goes on top of their version and the output says `"editedDuringPublish": true`. If the page
+is still at N, no text update landed (the publish was called off or failed): every leftover
+placeholder of one of our attachments is embedded, even for a file the markdown dropped, and no
+image is stripped, so the page shows what it showed before the publish.
+
 Comments: a comment whose marker is already on the page is left alone. Otherwise its anchor is its
 highlighted text, plus the words around its marker in version `before` when that version had one
 (a comment with an empty highlight is anchored from that marker alone). With version `before`, a
@@ -23,7 +30,7 @@ keeps its comment resolved.
 from __future__ import annotations
 
 import os
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Set, Tuple
 
 import cards
 import images
@@ -31,6 +38,7 @@ import marker_wrap
 import markers
 import markdown_doc
 from matcher import Anchor, align, find
+from storage import apply_edits, element_ranges, tokenize
 from textnorm import normalize
 from visible_text import blocks
 
@@ -149,6 +157,23 @@ def _reattach(body: str, comments: List[Dict], before_body: Optional[str],
     return body, counts
 
 
+def _restore_leftovers(body: str, ours: Set[str]) -> Tuple[str, int]:
+    """Embed every placeholder whose file name is one of our attachments; return (body, count).
+
+    Each keeps its own alt text. The size isn't known here, so the embed has no width."""
+    tokens = tokenize(body)
+    inside = set()
+    for first, last in element_ranges(tokens, "ac:image"):
+        inside.update(range(first, last + 1))
+    edits = []
+    for i, token in enumerate(tokens):
+        if (token.name == "img" and token.kind in ("empty", "start") and i not in inside
+                and token.attrs.get("src") in ours):
+            edits.append((token.start, token.end,
+                          images.embed_markup(token.attrs.get("alt", ""), token.attrs["src"], None)))
+    return apply_edits(body, edits), len(edits)
+
+
 def _message(up: Dict, emb: Dict, comments: Dict, made: int) -> str:
     parts = []
     if up["uploaded"]:
@@ -187,7 +212,17 @@ def run(page_id: str, md_path: str, before: Optional[int], client) -> Tuple[Dict
     except (KeyError, TypeError):
         return _fail(page_id, "couldn't read the page (%s)" % _http(status), up)
 
+    edited = before is not None and version > before + 1
+    called_off = before is not None and version == before
+    if called_off:
+        # No text update landed: strip nothing (an image that couldn't upload keeps the
+        # attachment it had), and put back every image `prepare` took off, below.
+        pictures = [image for image in pictures if image.src in up["ready"]]
     body, emb = images.embed(original, pictures, up["ready"])
+    if called_off:
+        ours = {name for name, note in existing.items() if note.startswith(images.OUR_MARK)}
+        body, restored = _restore_leftovers(body, ours)
+        emb["embedded"] += restored
 
     status, listed = client.inline_comments(page_id)
     if status != 200 or not isinstance(listed, list):
@@ -211,7 +246,8 @@ def run(page_id: str, md_path: str, before: Optional[int], client) -> Tuple[Dict
         message = _message(up, emb, comment_counts, card_counts["made"])
         status, saved = client.save_body(page, body, message)
         if status != 200:
-            hint = "; the page changed while this ran, so run finish again" if status == 409 else ""
+            hint = ("; the page changed during the publish, so publishing again will show what changed"
+                    if status == 409 else "")
             return _fail(page_id, "couldn't save the page (%s)%s" % (_http(status), hint), up)
         try:
             version = saved["version"]["number"]
@@ -227,5 +263,7 @@ def run(page_id: str, md_path: str, before: Optional[int], client) -> Tuple[Dict
     out["pageId"] = page_id
     if warning:
         out["warning"] = warning
+    if edited:
+        out["editedDuringPublish"] = True
     failed = any(out[key] for key in ("failed", "missingLocally", "notOnPage"))
     return out, 1 if failed else 0
