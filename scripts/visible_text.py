@@ -36,14 +36,41 @@ def _is_hidden(token: Token) -> bool:
     return token.name in HIDDEN_TAGS or token.name.startswith("ri:") or _is_card(token)
 
 
+def _count_cards(tokens: List[Token]) -> Dict[str, int]:
+    """Cards per URL that blocks() meets: the same walk, so a card inside a skipped element is not counted."""
+    counts: Dict[str, int] = {}
+    hidden_name = ""
+    hidden_depth = 0
+    for token in tokens:
+        if hidden_name:
+            if token.name == hidden_name and token.kind == "start":
+                hidden_depth += 1
+            elif token.name == hidden_name and token.kind == "end":
+                hidden_depth -= 1
+                if hidden_depth == 0:
+                    hidden_name = ""
+            continue
+        if token.kind in ("start", "empty") and _is_hidden(token):
+            if _is_card(token):
+                url = token.attrs.get("href", "")
+                counts[url] = counts.get(url, 0) + 1
+            if token.kind == "start":
+                hidden_name, hidden_depth = token.name, 1
+    return counts
+
+
 def blocks(body: str, link_words: Optional[Dict[str, List[str]]] = None) -> List[Block]:
     """Skipped (not visible): ac:structured-macro (all), ac:plain-text-body, ac:parameter, pre, ac:image,
     ri:*, ac:task-id, ac:task-status, time, and <a data-card-appearance=...> cards. Markers are transparent.
 
     link_words maps a URL to the markdown file's link texts for it, in the file's order. When it is given, the
-    k-th card with that URL (k counts from 0, in body order) shows as the k-th text instead of being hidden;
-    a card with no k-th text stays hidden. Each shown char maps to the whole card element, so nothing can be
+    k-th card with that URL (k counts from 0, in body order) shows as the k-th text instead of being hidden,
+    but only when the body has exactly as many cards to that URL as link_words has texts for it; when the
+    counts differ, no card to that URL can be matched to a link, so all of them stay hidden. Cards inside
+    skipped elements are in neither count. Each shown char maps to the whole card element, so nothing can be
     wrapped inside a card. With link_words=None every card is hidden."""
+    tokens = tokenize(body)
+    card_counts = _count_cards(tokens) if link_words is not None else {}  # cards per URL (first pass)
     result: List[Block] = []
     raw: List[str] = []  # the current block's raw characters ...
     raw_starts: List[int] = []  # ... and, for each, the body offset where it starts
@@ -67,14 +94,14 @@ def blocks(body: str, link_words: Optional[Dict[str, List[str]]] = None) -> List
     card_start = 0  # body offset where that card starts
 
     def show_card(token: Token) -> str:
-        """The file's words for this card, or "" when there are none (or no link_words)."""
+        """The file's words for this card, or "" when there are none, the counts differ (or no link_words)."""
         if link_words is None:
             return ""
         url = token.attrs.get("href", "")
         k = cards_seen.get(url, 0)
         cards_seen[url] = k + 1
         texts = link_words.get(url, [])
-        return texts[k] if k < len(texts) else ""
+        return texts[k] if len(texts) == card_counts.get(url, 0) else ""
 
     def put_card_words(words: str, start: int, end: int) -> None:
         for ch in words:
@@ -82,7 +109,7 @@ def blocks(body: str, link_words: Optional[Dict[str, List[str]]] = None) -> List
             raw_starts.append(start)
             raw_ends.append(end)
 
-    for token in tokenize(body):
+    for token in tokens:
         if hidden_name:  # inside a hidden element: only look for its matching end
             if token.name == hidden_name and token.kind == "start":
                 hidden_depth += 1
