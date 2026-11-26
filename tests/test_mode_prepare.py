@@ -173,8 +173,9 @@ class PrepareTests(unittest.TestCase):
         client = make_client(body, view="")
         out, code = run(client)
         self.assertEqual(code, 1)  # the stuck key still gives exit 1
-        self.assertEqual(client.saves[0][1], "<p>t</p><p>%s</p>" % jira_macro("ABC-2"))
-        self.assertEqual(out["madePlain"], {"jira": 0, "tip": 1, "unresolved": ["ABC-2"]})
+        self.assertEqual(client.saves, [])  # the publish is called off, so the page stays as it is
+        self.assertEqual(out["madePlain"], {"jira": 0, "unresolved": ["ABC-2"]})
+        self.assertEqual(out["version"], 5)
         self.assertNotIn("error", out)
 
     def test_message_for_every_kind(self):
@@ -210,13 +211,11 @@ class PrepareTests(unittest.TestCase):
         client = make_client(body, view=view_of("ABC-1"))
         out, code = run(client)
         self.assertEqual(code, 1)
-        self.assertEqual(out["madePlain"], {"jira": 1, "unresolved": ["ABC-2"]})
+        # The key that could be linked is not linked either: the page stays as it is.
+        self.assertEqual(out["madePlain"], {"jira": 0, "unresolved": ["ABC-2"]})
         self.assertNotIn("error", out)
-        # The part that could be fixed was still saved.
-        self.assertEqual(client.saves[0][1],
-                         "<p>%s %s %s</p>" % (issue_link("ABC-1"), jira_macro("ABC-2"),
-                                              jira_macro("ABC-2")))
-        self.assertEqual(out["version"], 6)
+        self.assertEqual(client.saves, [])
+        self.assertEqual(out["version"], 5)
 
     def test_unresolved_only_saves_nothing(self):
         client = make_client("<p>%s</p>" % jira_macro("ABC-2"), view="")
@@ -225,6 +224,22 @@ class PrepareTests(unittest.TestCase):
         self.assertEqual(out["madePlain"], {"jira": 0, "unresolved": ["ABC-2"]})
         self.assertEqual(client.saves, [])
         self.assertEqual(out["version"], 5)
+
+    def test_unresolved_changes_nothing_at_all(self):
+        # Images, an unreferenced image, a panel, a table of contents and a Jira issue that
+        # could be linked all wait: with a stuck key the publish is called off.
+        body = ("<p>%s</p><p>%s</p>%s%s<p>%s</p><p>%s</p><p>%s</p>"
+                % (embed("ours.png"), embed("old.png"), macro("info", "", rich("<p>i</p>")),
+                   macro("toc"), jira_macro("ABC-1"), jira_macro("ABC-2"), jira_macro("ABC-2")))
+        client = make_client(body, notes={"ours.png": OURS, "old.png": OURS},
+                             view=view_of("ABC-1"), version=9)
+        out, code = run(client, "![](ours.png)\n", overwrite=True)
+        self.assertEqual(code, 1)
+        self.assertEqual(client.saves, [])
+        self.assertEqual(client.pages[PAGE]["body"]["storage"]["value"], body)
+        self.assertEqual(out, {"pageId": PAGE, "version": 9, "unembedded": 0,
+                               "madePlain": {"jira": 0, "unresolved": ["ABC-2"]},
+                               "removedUnreferenced": 0})
 
     def test_markers_kept(self):
         marker1 = '<ac:inline-comment-marker ac:ref="ref-1">the anchor</ac:inline-comment-marker>'
