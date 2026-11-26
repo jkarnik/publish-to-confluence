@@ -189,11 +189,12 @@ class ClientModeTests(unittest.TestCase):
         self.assertTrue(out["error"].startswith("RuntimeError: failed with"))
         self.assertNotIn(CREDENTIALS[1], raw)
 
-    def test_not_implemented_error_is_not_caught(self):
+    def test_not_implemented_error_prints_json_exit_1(self):
         self.patch_config()
-        with mock.patch.object(mode_comments, "run", side_effect=NotImplementedError):
-            with self.assertRaises(NotImplementedError):
-                run_main(["comments", "123", "a.md"])
+        with mock.patch.object(mode_comments, "run", side_effect=NotImplementedError("no such call")):
+            code, out, _ = run_main(["comments", "123", "a.md"])
+        self.assertEqual(code, 1)
+        self.assertEqual(out, {"error": "NotImplementedError: no such call"})
 
 
 class MergeModeTests(unittest.TestCase):

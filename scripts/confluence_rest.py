@@ -135,8 +135,6 @@ def main(argv=None):
                 _print(failure[0])
                 return failure[1]
         out, code = _dispatch(mode, positionals, options, client)
-    except NotImplementedError:
-        raise  # a module that is still a stub: let it show
     except Exception as error:  # noqa: BLE001 - report anything else as JSON
         message = "%s: %s" % (type(error).__name__, error)
         if token:

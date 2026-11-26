@@ -154,7 +154,10 @@ class RestClient:
                           "&expand=body.storage,version" % (_quote(page_id), int(number)))
 
     def save_body(self, page: dict, body: str, message: str) -> Tuple[int, dict]:
-        """Minor edit, version + 1."""
+        """Save the body as version + 1, asking for a minor edit (minorEdit is sent as true).
+
+        Confluence still records these saves as normal versions, so don't rely on the flag.
+        """
         page_id = str(page["id"])
         payload = {
             "id": page_id,
