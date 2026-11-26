@@ -320,5 +320,63 @@ class FailureTests(unittest.TestCase):
         self.assertIn("nope.md", out["error"])
 
 
+SPEC_ITEMS = [("Flow export spec", "draft, owner to be confirmed"),
+              ("Alert routing spec", "approved, owner to be confirmed"),
+              ("Device discovery spec", "draft, owner to be confirmed"),
+              ("Path analysis spec", "in review, owner to be confirmed")]
+
+
+def card(url):
+    return '<a href="%s" data-card-appearance="inline">%s</a>' % (url, url)
+
+
+class LinkWordsTests(unittest.TestCase):
+    """The page holds smart-link cards from the last publish; the file holds the same links as words."""
+
+    def spec_page(self, marked, phrase):
+        old, md = [], []
+        for k, (title, note) in enumerate(SPEC_ITEMS):
+            url = "https://example.com/spec-%d" % k
+            text = note.replace(phrase, marker("R9", phrase), 1) if k == marked else note
+            old.append("<li>%s - %s</li>" % (card(url), text))
+            md.append("- [%s](%s) - %s" % (title, url, note))
+        return ("<p>Related specs:</p><ul>" + "".join(old) + "</ul><p>Next steps follow.</p>",
+                "Related specs:\n\n" + "\n".join(md) + "\n\nNext steps follow.\n")
+
+    def test_look_alike_items_with_cards_reattach_in_their_own_item(self):
+        page_body, md = self.spec_page(2, "owner to be confirmed")
+        out, code = run([comment("c1", ref="R9", selection="owner to be confirmed")],
+                        page_body=page_body, markdown=md)
+        self.assertEqual(code, 0)
+        self.assertEqual(out["open"], [
+            {"id": "c1", "text": "owner to be confirmed", "status": "willReattach", "reason": None, "to": None}])
+        self.assertEqual(out["willDetach"], 0)
+
+    def test_highlight_spanning_a_card_reattaches_whole(self):
+        page_body = ("<p>Intro.</p><p>Read " + marker("R9", "the " + card("https://example.com/doc")
+                                                      + " before the review") + " starts.</p>")
+        md = "Intro.\n\nRead the [design doc](https://example.com/doc) before the review starts.\n"
+        out, code = run([comment("c1", ref="R9", selection="the design doc before the review")],
+                        page_body=page_body, markdown=md)
+        self.assertEqual(code, 0)
+        self.assertEqual(out["open"], [
+            {"id": "c1", "text": "the design doc before the review", "status": "willReattach",
+             "reason": None, "to": None}])
+
+    def test_plain_links_do_not_shift_the_cards_words(self):
+        # The file's first link to this URL is plain (it stays an ordinary link on the page, never a card),
+        # so the page's only card for it reads as the second link's words.
+        url = "https://example.com/doc"
+        page_body = ("<p>See <a href=\"%s\">intro link</a> first.</p><p>Read %s, then go on.</p>"
+                     % (url, marker("R9", "the " + card(url) + " now")))
+        md = ("See [intro link](%s \"plain\") first.\n\nRead the [design doc](%s) now, then go on.\n"
+              % (url, url))
+        out, code = run([comment("c1", ref="R9", selection="the design doc now")],
+                        page_body=page_body, markdown=md)
+        self.assertEqual(code, 0)
+        self.assertEqual(out["open"], [
+            {"id": "c1", "text": "the design doc now", "status": "willReattach", "reason": None, "to": None}])
+
+
 if __name__ == "__main__":
     unittest.main()

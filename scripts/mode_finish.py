@@ -73,10 +73,22 @@ def _read_before(client, page_id: str, before: int) -> Optional[str]:
         return None
 
 
-def _anchor(before_body: Optional[str], ref: str, selection: str) -> Tuple[Anchor, bool]:
+def _link_words(links: List[markdown_doc.LinkRef]) -> Dict[str, List[str]]:
+    """URL -> the file's link texts for it, in file order, so a card in version `before` reads as the
+    file's words. Links tagged "plain" stay ordinary links on the page and never become cards, so
+    they aren't counted."""
+    words: Dict[str, List[str]] = {}
+    for link in links:
+        if link.tag != "plain":
+            words.setdefault(link.url, []).append(link.text)
+    return words
+
+
+def _anchor(before_body: Optional[str], ref: str, selection: str,
+            link_words: Optional[Dict[str, List[str]]] = None) -> Tuple[Anchor, bool]:
     """The comment's anchor, and whether its marker was found in the `before` body."""
     if before_body is not None:
-        found = markers.anchor_for(before_body, ref, selection)
+        found = markers.anchor_for(before_body, ref, selection, link_words)
         if found is not None:
             return found, True
     return Anchor(normalize(selection)), False
@@ -93,11 +105,15 @@ def _selection(item: Dict) -> str:
 
 
 def _reattach(body: str, comments: List[Dict], before_body: Optional[str],
-              before_unreadable: bool = False) -> Tuple[str, Dict]:
+              before_unreadable: bool = False,
+              link_words: Optional[Dict[str, List[str]]] = None) -> Tuple[str, Dict]:
     """Put back the markers of comments that aren't on the page. Return (body, counts).
 
     before_unreadable: `--before` was given but couldn't be read, so an open comment that
     doesn't match exactly is reported as detached (reason `noBefore`), not stillDetached.
+    link_words: the file's link texts by URL; used only to read cards in `before_body`. The body
+    being wrapped never gets it, because on a failed update it can still hold cards and nothing
+    may be wrapped inside a card.
     """
     counts: Dict = {"reattached": 0, "moved": [], "detached": [], "stillDetached": [],
                     "alreadyAttached": 0, "resolved": {"reattached": 0, "notFound": 0, "skipped": 0}}
@@ -108,7 +124,7 @@ def _reattach(body: str, comments: List[Dict], before_body: Optional[str],
     if before_body is not None:
         # Wrapping a marker never changes the visible block texts, so this one alignment of
         # the old page's blocks onto the current ones holds for the whole run.
-        old_texts = [block.text for block in blocks(before_body)]
+        old_texts = [block.text for block in blocks(before_body, link_words)]
         doc = blocks(body)
         alignment = align(old_texts, [block.text for block in doc])
     for item in comments:
@@ -123,7 +139,7 @@ def _reattach(body: str, comments: List[Dict], before_body: Optional[str],
             resolved_counts["skipped"] += 1
             continue
 
-        anchor, had_marker = _anchor(before_body, ref, selection)
+        anchor, had_marker = _anchor(before_body, ref, selection, link_words)
         if doc is None:
             doc = blocks(body)
         texts = [block.text for block in doc]
@@ -238,7 +254,8 @@ def run(page_id: str, md_path: str, before: Optional[int], client) -> Tuple[Dict
                 warning = ("couldn't read version %d, so only exact matching ran; open comments that "
                            "didn't match are listed as detached (reason noBefore) because it can't "
                            "tell whether they were attached before" % before)
-    body, comment_counts = _reattach(body, listed, before_body, before_unreadable=warning is not None)
+    body, comment_counts = _reattach(body, listed, before_body, before_unreadable=warning is not None,
+                                     link_words=_link_words(links))
 
     body, card_counts = cards.make_cards(body, links)
 

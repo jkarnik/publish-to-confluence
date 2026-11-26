@@ -4,7 +4,7 @@ from __future__ import annotations
 from typing import Dict, List, Optional, Tuple
 
 import visible_text
-from markdown_doc import visible_blocks
+from markdown_doc import visible_blocks, web_links
 from markers import anchor_for, refs
 from matcher import Anchor, align, find
 from textnorm import normalize
@@ -20,12 +20,24 @@ def _http(status: int) -> str:
     return "HTTP %d" % status if status else "network error"
 
 
-def _anchor(comment: Dict, body: str, present: set) -> Tuple[Optional[Anchor], bool]:
+def _link_words(md: str) -> Dict[str, List[str]]:
+    """URL -> the file's link texts for it, in file order, so a card on the page reads as the file's words.
+
+    Links tagged "plain" stay ordinary links on the page and never become cards, so they aren't counted."""
+    words: Dict[str, List[str]] = {}
+    for link in web_links(md):
+        if link.tag != "plain":
+            words.setdefault(link.url, []).append(link.text)
+    return words
+
+
+def _anchor(comment: Dict, body: str, present: set,
+            link_words: Dict[str, List[str]]) -> Tuple[Optional[Anchor], bool]:
     """(anchor, had_marker); the anchor is None when the comment has nothing to look for."""
     ref = comment.get("ref")
     selection = comment.get("selection") or ""
     if ref and ref in present:
-        found = anchor_for(body, ref, selection)
+        found = anchor_for(body, ref, selection, link_words)
         if found is not None:
             return found, True
     if selection:
@@ -33,9 +45,9 @@ def _anchor(comment: Dict, body: str, present: set) -> Tuple[Optional[Anchor], b
     return None, False
 
 
-def _open_entry(comment: Dict, body: str, present: set, texts: List[str],
-                old_texts: List[str], alignment: List[Optional[int]]) -> Dict:
-    anchor, had_marker = _anchor(comment, body, present)
+def _open_entry(comment: Dict, body: str, present: set, link_words: Dict[str, List[str]],
+                texts: List[str], old_texts: List[str], alignment: List[Optional[int]]) -> Dict:
+    anchor, had_marker = _anchor(comment, body, present, link_words)
     entry = {"id": comment.get("id"), "text": anchor.text if anchor else "",
              "status": "staysDetached", "reason": None, "to": None}
     if anchor is None:
@@ -52,9 +64,9 @@ def _open_entry(comment: Dict, body: str, present: set, texts: List[str],
     return entry
 
 
-def _resolved_entry(comment: Dict, body: str, present: set, texts: List[str],
-                    old_texts: List[str], alignment: List[Optional[int]]) -> Dict:
-    anchor, _ = _anchor(comment, body, present)
+def _resolved_entry(comment: Dict, body: str, present: set, link_words: Dict[str, List[str]],
+                    texts: List[str], old_texts: List[str], alignment: List[Optional[int]]) -> Dict:
+    anchor, _ = _anchor(comment, body, present, link_words)
     exact = anchor is not None and find(anchor, texts, False, old_texts, alignment).status == "exact"
     return {"id": comment.get("id"), "text": anchor.text if anchor else "",
             "status": "willReattach" if exact else "notFound"}
@@ -78,7 +90,9 @@ def run(page_id: str, md_path: str, client) -> Tuple[Dict, int]:
     body = (((page.get("body") or {}).get("storage") or {}).get("value")) or ""
     present = refs(body)
     texts = [block.text for block in visible_blocks(md)]
-    old_texts = [block.text for block in visible_text.blocks(body)]  # the blocks anchor_for numbers
+    link_words = _link_words(md)
+    # The blocks anchor_for numbers; a card reads as the file's words for its link, like `texts`.
+    old_texts = [block.text for block in visible_text.blocks(body, link_words)]
     alignment = align(old_texts, texts)
 
     open_entries: List[Dict] = []
@@ -86,9 +100,9 @@ def run(page_id: str, md_path: str, client) -> Tuple[Dict, int]:
     for comment in comments:
         state = comment.get("status")
         if state in OPEN_STATUSES:
-            open_entries.append(_open_entry(comment, body, present, texts, old_texts, alignment))
+            open_entries.append(_open_entry(comment, body, present, link_words, texts, old_texts, alignment))
         elif state == "resolved":
-            resolved_entries.append(_resolved_entry(comment, body, present, texts, old_texts, alignment))
+            resolved_entries.append(_resolved_entry(comment, body, present, link_words, texts, old_texts, alignment))
     will_detach = sum(1 for entry in open_entries if entry["status"] == "willDetach")
     return {"pageId": page_id, "open": open_entries, "resolved": resolved_entries,
             "willDetach": will_detach}, 0
