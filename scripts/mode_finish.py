@@ -10,10 +10,15 @@ It runs after every text update and makes one minor edit. In order:
 5. save once, only if the body changed.
 
 Comments: a comment whose marker is already on the page is left alone. Otherwise its anchor is its
-highlighted text, plus the words around its marker in version `before` when that version had one.
-Open comments may move onto reworded text, but only with that old marker (without `--before`, only
-exact matching runs). Resolved comments are re-attached on an exact match only; that is allowed
-because probe P2 showed a re-inserted marker keeps its comment resolved.
+highlighted text, plus the words around its marker in version `before` when that version had one
+(a comment with an empty highlight is anchored from that marker alone). With version `before`, a
+comment stays inside the block that replaced its own, so deleting an item can't move its comment
+onto a look-alike item. Open comments may move onto reworded text, but only with that old marker.
+Without `--before` only exact matching runs, and an open comment that doesn't match is `stillDetached`.
+When `--before` can't be read only exact matching runs too, but such a comment is `detached` with
+reason `noBefore`, because it can't tell whether the comment was attached before. Resolved comments
+are re-attached on an exact match only; that is allowed because probe P2 showed a re-inserted marker
+keeps its comment resolved.
 """
 from __future__ import annotations
 
@@ -25,7 +30,7 @@ import images
 import marker_wrap
 import markers
 import markdown_doc
-from matcher import Anchor, find
+from matcher import Anchor, align, find
 from textnorm import normalize
 from visible_text import blocks
 
@@ -70,21 +75,38 @@ def _anchor(before_body: Optional[str], ref: str, selection: str) -> Tuple[Ancho
 
 
 def _usable(item: Dict) -> bool:
+    """A comment can be re-attached only if it has a ref; its selection text may be empty."""
+    return bool(item.get("ref"))
+
+
+def _selection(item: Dict) -> str:
     selection = item.get("selection")
-    return bool(item.get("ref")) and isinstance(selection, str) and bool(selection.strip())
+    return selection if isinstance(selection, str) else ""
 
 
-def _reattach(body: str, comments: List[Dict], before_body: Optional[str]) -> Tuple[str, Dict]:
-    """Put back the markers of comments that aren't on the page. Return (body, counts)."""
+def _reattach(body: str, comments: List[Dict], before_body: Optional[str],
+              before_unreadable: bool = False) -> Tuple[str, Dict]:
+    """Put back the markers of comments that aren't on the page. Return (body, counts).
+
+    before_unreadable: `--before` was given but couldn't be read, so an open comment that
+    doesn't match exactly is reported as detached (reason `noBefore`), not stillDetached.
+    """
     counts: Dict = {"reattached": 0, "moved": [], "detached": [], "stillDetached": [],
                     "alreadyAttached": 0, "resolved": {"reattached": 0, "notFound": 0, "skipped": 0}}
     resolved_counts = counts["resolved"]
     on_page = markers.refs(body)
     doc = None  # the blocks of the current body; dropped whenever a wrap changes it
+    old_texts = alignment = None
+    if before_body is not None:
+        # Wrapping a marker never changes the visible block texts, so this one alignment of
+        # the old page's blocks onto the current ones holds for the whole run.
+        old_texts = [block.text for block in blocks(before_body)]
+        doc = blocks(body)
+        alignment = align(old_texts, [block.text for block in doc])
     for item in comments:
         if not _usable(item):
             continue
-        ref, selection = item["ref"], item["selection"]
+        ref, selection = item["ref"], _selection(item)
         if ref in on_page:
             counts["alreadyAttached"] += 1
             continue
@@ -97,7 +119,8 @@ def _reattach(body: str, comments: List[Dict], before_body: Optional[str]) -> Tu
         if doc is None:
             doc = blocks(body)
         texts = [block.text for block in doc]
-        result = find(anchor, texts, allow_move=had_marker and not resolved)
+        result = find(anchor, texts, allow_move=had_marker and not resolved,
+                      old_texts=old_texts, alignment=alignment)
 
         reason = result.reason or "textGone"
         if result.status in ("exact", "moved"):
@@ -119,6 +142,8 @@ def _reattach(body: str, comments: List[Dict], before_body: Optional[str]) -> Tu
             resolved_counts["notFound"] += 1
         elif had_marker:
             counts["detached"].append({"id": item.get("id"), "text": anchor.text, "reason": reason})
+        elif before_unreadable:
+            counts["detached"].append({"id": item.get("id"), "text": anchor.text, "reason": "noBefore"})
         else:
             counts["stillDetached"].append({"id": item.get("id"), "text": anchor.text})
     return body, counts
@@ -175,8 +200,10 @@ def run(page_id: str, md_path: str, before: Optional[int], client) -> Tuple[Dict
         if any(_usable(item) and item["ref"] not in on_page for item in listed):
             before_body = _read_before(client, page_id, before)
             if before_body is None:
-                warning = "couldn't read version %d, so only exact matching ran" % before
-    body, comment_counts = _reattach(body, listed, before_body)
+                warning = ("couldn't read version %d, so only exact matching ran; open comments that "
+                           "didn't match are listed as detached (reason noBefore) because it can't "
+                           "tell whether they were attached before" % before)
+    body, comment_counts = _reattach(body, listed, before_body, before_unreadable=warning is not None)
 
     body, card_counts = cards.make_cards(body, links)
 

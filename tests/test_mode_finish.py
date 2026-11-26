@@ -2,6 +2,7 @@
 import os
 import sys
 import unittest
+from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import helpers  # noqa: E402,F401  (puts scripts/ on sys.path)
@@ -10,6 +11,9 @@ import cards  # noqa: E402
 import mode_finish  # noqa: E402
 
 PAGE = "100"
+NO_BEFORE_WARNING = ("couldn't read version %d, so only exact matching ran; open comments that didn't "
+                     "match are listed as detached (reason noBefore) because it can't tell whether "
+                     "they were attached before")
 
 
 def marker(ref, text):
@@ -177,16 +181,164 @@ class ReattachTests(FinishCase):
         s = self.setup(CURRENT, md=MD, comments=[comment("c1", "r1", "brown fox leaps")])
         out, code = s.run(before=9)  # version 9 isn't in the fake, so it reads as 404
         self.assertEqual(code, 0)
-        self.assertEqual(out["warning"], "couldn't read version 9, so only exact matching ran")
+        self.assertEqual(out["warning"], NO_BEFORE_WARNING % 9)
         self.assertEqual(out["comments"]["reattached"], 1)
+        self.assertEqual(out["comments"]["detached"], [])  # it matched, so nothing is "noBefore"
 
     def test_before_read_failure_reattaches_exact_only(self):
-        s = self.setup(CURRENT, md=MD, comments=[comment("c1", "r1", "brown fox jumps")],
+        # Version 3 holds the comment's marker, so with a good read this would move
+        # (test_reattach_moved); the 500 means only exact matching runs.
+        before = OLD % marker("r1", "brown fox jumps over")
+        s = self.setup(CURRENT, md=MD, before={3: before},
+                       comments=[comment("c1", "r1", "brown fox jumps over")],
                        fail={"read_version": (500, "boom")})
         out, code = s.run(before=3)
         self.assertEqual(code, 0)
-        self.assertIn("couldn't read version 3", out["warning"])
+        self.assertEqual(out["warning"], NO_BEFORE_WARNING % 3)
         self.assertEqual(out["comments"]["moved"], [])
+        self.assertEqual(out["comments"]["reattached"], 0)
+        self.assertEqual(out["comments"]["stillDetached"], [])
+        self.assertEqual(out["comments"]["detached"],
+                         [{"id": "c1", "text": "brown fox jumps over", "reason": "noBefore"}])
+        self.assertEqual(s.client.saves, [])
+
+    def test_before_read_failure_resolved_comment_is_not_found(self):
+        s = self.setup(CURRENT, md=MD,
+                       comments=[comment("c1", "r1", "brown fox jumps over", status="resolved")])
+        out, code = s.run(before=9)
+        self.assertEqual(code, 0)
+        self.assertEqual(out["comments"]["resolved"], {"reattached": 0, "notFound": 1, "skipped": 0})
+        self.assertEqual(out["comments"]["detached"], [])
+        self.assertEqual(out["comments"]["stillDetached"], [])
+
+    def test_unchanged_comment_reattaches_exactly_with_before(self):
+        # The text update only dropped the marker; its words are the same.
+        before = ('<p>Intro line.</p><p>The quick %s over it.</p><p>Closing line.</p>'
+                  % marker("r1", "brown fox jumps"))
+        s = self.setup('<p>Intro line.</p><p>The quick brown fox jumps over it.</p><p>Closing line.</p>',
+                       md="Intro line.\n\nThe quick brown fox jumps over it.\n\nClosing line.\n",
+                       before={3: before}, comments=[comment("c1", "r1", "brown fox jumps")])
+        out, code = s.run(before=3)
+        self.assertEqual(code, 0)
+        self.assertEqual(out["comments"]["reattached"], 1)
+        self.assertEqual(out["comments"]["moved"], [])
+        self.assertEqual(out["comments"]["detached"], [])
+        self.assertNotIn("warning", out)
+        self.assertEqual(s.saved_body(), before)
+
+    def test_alignment_is_computed_once_for_every_find(self):
+        before = ('<p>Intro line.</p><p>The quick %s over it.</p><p>Middle line.</p>'
+                  '<p>The slow %s under it.</p>' % (marker("r1", "brown fox jumps"),
+                                                    marker("r2", "grey cat sleeps")))
+        current = before.replace(marker("r1", "brown fox jumps"), "brown fox jumps").replace(
+            marker("r2", "grey cat sleeps"), "grey cat sleeps")
+        s = self.setup(current, md="x\n", before={3: before},
+                       comments=[comment("c1", "r1", "brown fox jumps"),
+                                 comment("c2", "r2", "grey cat sleeps")])
+        with mock.patch.object(mode_finish, "align", wraps=mode_finish.align) as spy_align, \
+                mock.patch.object(mode_finish, "find", wraps=mode_finish.find) as spy_find:
+            out, code = s.run(before=3)
+        self.assertEqual(code, 0)
+        self.assertEqual(out["comments"]["reattached"], 2)
+        self.assertEqual(spy_align.call_count, 1)
+        self.assertEqual(spy_find.call_count, 2)
+        old_texts = ["Intro line.", "The quick brown fox jumps over it.", "Middle line.",
+                     "The slow grey cat sleeps under it."]
+        for call in spy_find.call_args_list:
+            self.assertEqual(call.kwargs["old_texts"], old_texts)
+            self.assertEqual(call.kwargs["alignment"], [0, 1, 2, 3])
+
+
+def alert_list(*names):
+    """A page with one look-alike list item per name."""
+    items = "".join("<li>Alert when packet loss on the %s interface exceeds 5%%.</li>" % name
+                    for name in names)
+    return "<h2>Alerting requirements</h2><ul>%s</ul><p>Out of scope.</p>" % items
+
+
+class OwnBlockTests(FinishCase):
+    """With version `before`, a comment stays in the block that replaced its own."""
+
+    TAIL = "downlink interface exceeds 5%"
+
+    def before_list(self):
+        return alert_list("uplink", "downlink", "backup").replace(self.TAIL, marker("r1", self.TAIL))
+
+    def test_deleted_list_item_detaches(self):
+        # The update deleted the commented item; its look-alike siblings stay.
+        body = alert_list("uplink", "backup")
+        s = self.setup(body, md="Alerting requirements\n", before={3: self.before_list()},
+                       comments=[comment("c1", "r1", self.TAIL)])
+        out, code = s.run(before=3)
+        self.assertEqual(code, 0)
+        self.assertEqual(out["comments"]["detached"],
+                         [{"id": "c1", "text": self.TAIL, "reason": "textGone"}])
+        self.assertEqual(out["comments"]["reattached"], 0)
+        self.assertEqual(out["comments"]["moved"], [])
+        self.assertEqual(s.client.saves, [])
+        self.assertNotIn("inline-comment-marker", s.client.pages[PAGE]["body"]["storage"]["value"])
+
+
+class EmptySelectionTests(FinishCase):
+    """A comment with a ref but no selection text is still re-attached or reported."""
+
+    BEFORE = '<p>Intro line.</p><p>The quick %s over it.</p>' % marker("r1", "brown fox jumps")
+
+    def test_already_on_page_is_counted(self):
+        s = self.setup(self.BEFORE, md="x\n", comments=[comment("c1", "r1", "")])
+        out, code = s.run()
+        self.assertEqual(code, 0)
+        self.assertEqual(out["comments"]["alreadyAttached"], 1)
+        self.assertEqual(s.client.saves, [])
+
+    def test_reattaches_from_its_marker_in_before(self):
+        s = self.setup('<p>Intro line.</p><p>The quick brown fox jumps over it.</p>', md="x\n",
+                       before={3: self.BEFORE}, comments=[comment("c1", "r1", "")])
+        out, code = s.run(before=3)
+        self.assertEqual(code, 0)
+        self.assertEqual(out["comments"]["reattached"], 1)
+        self.assertEqual(s.saved_body(), self.BEFORE)
+
+    def test_text_gone_is_detached(self):
+        s = self.setup('<p>Intro line.</p><p>Nothing like it now.</p>', md="x\n",
+                       before={3: self.BEFORE}, comments=[comment("c1", "r1", "")])
+        out, code = s.run(before=3)
+        self.assertEqual(code, 0)
+        self.assertEqual(out["comments"]["detached"],
+                         [{"id": "c1", "text": "brown fox jumps", "reason": "textGone"}])
+        self.assertEqual(out["comments"]["stillDetached"], [])
+
+    def test_no_marker_in_before_is_still_detached(self):
+        before = '<p>Intro line.</p><p>The quick brown fox jumps over it.</p>'
+        s = self.setup(before, md="x\n", before={3: before}, comments=[comment("c1", "r1", "")])
+        out, code = s.run(before=3)
+        self.assertEqual(code, 0)
+        self.assertEqual(out["comments"]["stillDetached"], [{"id": "c1", "text": ""}])
+        self.assertEqual(out["comments"]["detached"], [])
+
+    def test_without_before_is_still_detached(self):
+        # A comment with no selection key at all is the same as an empty one.
+        s = self.setup('<p>Intro line.</p>', md="x\n",
+                       comments=[{"id": "c1", "status": "open", "ref": "r1"}])
+        out, code = s.run()
+        self.assertEqual(code, 0)
+        self.assertEqual(out["comments"]["stillDetached"], [{"id": "c1", "text": ""}])
+        self.assertEqual(s.client.saves, [])
+
+    def test_unreadable_before_is_no_before(self):
+        s = self.setup('<p>Intro line.</p>', md="x\n", comments=[comment("c1", "r1", "")])
+        out, code = s.run(before=9)
+        self.assertEqual(code, 0)
+        self.assertEqual(out["comments"]["detached"], [{"id": "c1", "text": "", "reason": "noBefore"}])
+        self.assertEqual(out["warning"], NO_BEFORE_WARNING % 9)
+
+    def test_without_a_ref_it_is_skipped(self):
+        s = self.setup('<p>Intro line.</p>', md="x\n", comments=[comment("c1", "", "Intro line")])
+        out, code = s.run()
+        self.assertEqual(code, 0)
+        self.assertEqual(out["comments"]["reattached"], 0)
+        self.assertEqual(out["comments"]["stillDetached"], [])
+        self.assertEqual(s.client.saves, [])
 
 
 class ResolvedTests(FinishCase):
