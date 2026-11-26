@@ -49,7 +49,8 @@ def _cursor(starts_by_block: List[List[int]], offset: int) -> Tuple[int, int]:
 
 
 def anchor_for(body: str, ref: str, selection: str) -> Optional[Anchor]:
-    """None if no marker with ref; text = visible text inside its pieces, or selection when that is empty."""
+    """None if no marker with ref; text = visible text inside its pieces, or selection when that is empty.
+    block = index in blocks(body) of the block holding the first visible char; -1 when there is none."""
     tokens = tokenize(body)
     pieces = _pieces(tokens, ref)
     if not pieces:
@@ -73,7 +74,7 @@ def anchor_for(body: str, ref: str, selection: str) -> Optional[Anchor]:
         last_block, last_index = chars[-1]
         before = context_of(texts, first_block, first_index, first_index + 1)[0]
         after = context_of(texts, last_block, last_index, last_index + 1)[1]
-        return Anchor(normalize("".join(parts)), before, after)
+        return Anchor(normalize("".join(parts)), before, after, first_block)
     if not doc:
         return Anchor(normalize(selection))
     starts_by_block = [block.starts for block in doc]

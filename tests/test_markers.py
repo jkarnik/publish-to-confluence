@@ -36,7 +36,7 @@ class AnchorTests(unittest.TestCase):
     def test_anchor_middle_of_paragraph(self):
         body = "<p>The quick brown " + marker("R1", "fox jumps") + " over the lazy dog</p>"
         self.assertEqual(anchor_for(body, "R1", "ignored"),
-                         Anchor("fox jumps", "The quick brown", "over the lazy dog"))
+                         Anchor("fox jumps", "The quick brown", "over the lazy dog", block=0))
 
     def test_context_is_at_most_32_chars(self):
         left = "a" * 20 + " " + "b" * 20
@@ -53,7 +53,7 @@ class AnchorTests(unittest.TestCase):
         body = ("<p>Start here plain " + marker("R1", "words and ")
                 + "<strong>" + marker("R1", "the bold") + "</strong> then the end</p>")
         self.assertEqual(anchor_for(body, "R1", ""),
-                         Anchor("words and the bold", "Start here plain", "then the end"))
+                         Anchor("words and the bold", "Start here plain", "then the end", block=0))
 
     def test_multi_piece_before_from_first_after_from_last(self):
         body = ("<p>alpha " + marker("R1", "beta ") + "gamma " + marker("R1", "delta") + " epsilon</p>")
@@ -66,11 +66,11 @@ class AnchorTests(unittest.TestCase):
         body = ("<p>Intro " + marker("R1", "ends the first") + "</p>"
                 "<p>" + marker("R1", "starts the second") + " outro</p>")
         self.assertEqual(anchor_for(body, "R1", ""),
-                         Anchor("ends the first starts the second", "Intro", "outro"))
+                         Anchor("ends the first starts the second", "Intro", "outro", block=0))
 
     def test_other_refs_are_ignored(self):
         body = "<p>one " + marker("R1", "alpha") + " two " + marker("R2", "beta") + " three</p>"
-        self.assertEqual(anchor_for(body, "R2", ""), Anchor("beta", "one alpha two", "three"))
+        self.assertEqual(anchor_for(body, "R2", ""), Anchor("beta", "one alpha two", "three", block=0))
 
     def test_anchor_card_uses_selection(self):
         body = "<p>See " + marker("R1", CARD) + " for details</p>"
@@ -91,7 +91,7 @@ class AnchorTests(unittest.TestCase):
     def test_marker_inside_a_link(self):
         body = ('<p>Read <a href="https://example.atlassian.net/wiki">'
                 + marker("R1", "the guide") + "</a> today</p>")
-        self.assertEqual(anchor_for(body, "R1", ""), Anchor("the guide", "Read", "today"))
+        self.assertEqual(anchor_for(body, "R1", ""), Anchor("the guide", "Read", "today", block=0))
 
     def test_text_is_normalized(self):
         body = "<p>Say " + marker("R1", "&ldquo;caf&eacute;&rdquo;&nbsp;&amp;   tea") + " now</p>"
@@ -113,7 +113,7 @@ class AnchorTests(unittest.TestCase):
                 "<tr><td>Router</td><td>" + marker("R1", "Alice") + "</td><td>Primary</td></tr>"
                 "</tbody></table>")
         self.assertEqual(anchor_for(body, "R1", ""),
-                         Anchor("Alice", "Name Owner Router", "Primary"))
+                         Anchor("Alice", "Name Owner Router", "Primary", block=3))
 
     def test_empty_marker_tag_uses_its_position(self):
         body = '<p>left side<ac:inline-comment-marker ac:ref="R1"/> right side</p>'
@@ -122,6 +122,41 @@ class AnchorTests(unittest.TestCase):
     def test_unclosed_marker_is_found(self):
         body = '<p>left side <ac:inline-comment-marker ac:ref="R1"> right side</p>'
         self.assertEqual(anchor_for(body, "R1", "picked").text, "picked")
+
+    def test_anchor_block_index(self):
+        body = ("<p>First paragraph here</p><p>Second " + marker("R1", "paragraph target") + " ends</p>"
+                "<p>Third paragraph</p>")
+        self.assertEqual(anchor_for(body, "R1", "").block, 1)
+
+    def test_anchor_block_index_skips_blocks_with_no_visible_text(self):
+        body = ("<p>Intro</p><p>" + CARD + "</p>"
+                '<ac:structured-macro ac:name="code"><ac:plain-text-body>x = 1</ac:plain-text-body>'
+                "</ac:structured-macro><p>Last " + marker("R1", "one") + "</p>")
+        self.assertEqual(anchor_for(body, "R1", "").block, 1)
+
+    def test_anchor_block_index_in_table_cell(self):
+        body = ("<table><tbody><tr><th>Name</th><th>Owner</th></tr>"
+                "<tr><td>Router</td><td>" + marker("R1", "Alice") + "</td><td>Primary</td></tr>"
+                "</tbody></table>")
+        self.assertEqual(anchor_for(body, "R1", "").block, 3)
+
+    def test_anchor_block_is_that_of_the_first_visible_char(self):
+        body = ("<p>Intro " + marker("R1", "ends the first") + "</p>"
+                "<p>" + marker("R1", "starts the second") + " outro</p>")
+        self.assertEqual(anchor_for(body, "R1", "").block, 0)
+        body = ("<p>Intro</p><p>" + marker("R1", CARD) + "</p>"
+                "<p>" + marker("R1", "second piece") + " outro</p>")
+        self.assertEqual(anchor_for(body, "R1", "card").block, 1)
+
+    def test_card_only_anchor_block_unknown(self):
+        body = "<p>Before block</p><p>" + marker("R1", CARD) + "</p><p>After block</p>"
+        self.assertEqual(anchor_for(body, "R1", "the card").block, -1)
+        body = "<p>" + marker("R1", CARD) + "</p>"
+        self.assertEqual(anchor_for(body, "R1", "the card").block, -1)
+
+    def test_empty_marker_tag_block_unknown(self):
+        body = '<p>left side<ac:inline-comment-marker ac:ref="R1"/> right side</p>'
+        self.assertEqual(anchor_for(body, "R1", "picked").block, -1)
 
     def test_no_visible_text_anywhere(self):
         body = "<p>" + marker("R1", CARD) + "</p>"
