@@ -299,9 +299,10 @@ class CardWordsTests(unittest.TestCase):
         self.assertEqual([b.text for b in blocks(body, {self.URL: ["first words", "second words"]})],
                          ["first words and second words"])
 
-    def test_card_beyond_the_files_links_stays_hidden(self):
+    def test_more_cards_than_the_files_links_hide_them_all(self):
         body = "<p>%s and %s and %s</p>" % (self.card(), self.card(), self.card())
-        self.assertEqual([b.text for b in blocks(body, {self.URL: ["one", "two"]})], ["one and two and"])
+        self.assertEqual([b.text for b in blocks(body, {self.URL: ["one", "two"]})], ["and and"])
+        self.assertEqual([b.text for b in blocks(body, {self.URL: ["one", "two", "three"]})], ["one and two and three"])
 
     def test_cards_to_different_urls_count_separately(self):
         body = "<p>%s %s %s</p>" % (self.card(), self.card(self.OTHER), self.card())
@@ -338,7 +339,7 @@ class CardWordsTests(unittest.TestCase):
     def test_other_hidden_things_are_unchanged_by_a_map(self):
         macro = '<ac:structured-macro ac:name="code"><ac:plain-text-body>x = 1</ac:plain-text-body></ac:structured-macro>'
         body = "<p>a %s b %s c</p>%s<p>d</p>" % (self.card(), self.card(), macro)
-        self.assertEqual([b.text for b in blocks(body, {self.URL: ["w1"]})], ["a w1 b c", "d"])
+        self.assertEqual([b.text for b in blocks(body, {self.URL: ["w1", "w2"]})], ["a w1 b w2 c", "d"])
 
     def test_a_card_inside_a_hidden_macro_is_not_counted(self):
         macro = '<ac:structured-macro ac:name="info"><ac:rich-text-body><p>%s</p></ac:rich-text-body></ac:structured-macro>' % self.card()
@@ -349,6 +350,50 @@ class CardWordsTests(unittest.TestCase):
         marked = '<ac:inline-comment-marker ac:ref="m1">%s</ac:inline-comment-marker>' % self.card()
         body = "<p>a %s b</p>" % marked
         self.assertEqual([b.text for b in blocks(body, {self.URL: ["link words"]})], ["a link words b"])
+
+    def test_two_cards_and_one_file_link_to_the_url_stay_hidden(self):
+        body = "<p>%s and %s</p>" % (self.card(), self.card())
+        self.assertEqual([b.text for b in blocks(body, {self.URL: ["only words"]})], ["and"])
+
+    def test_one_card_and_two_file_links_to_the_url_stay_hidden(self):
+        body = "<p>See %s now</p>" % self.card()
+        self.assertEqual([b.text for b in blocks(body, {self.URL: ["first words", "second words"]})], ["See now"])
+
+    def test_an_empty_list_of_words_for_the_url_leaves_its_cards_hidden(self):
+        body = "<p>See %s now</p>" % self.card()
+        self.assertEqual([b.text for b in blocks(body, {self.URL: []})], ["See now"])
+
+    def test_a_mismatch_for_one_url_leaves_another_urls_matching_cards_shown(self):
+        body = "<p>%s %s %s %s</p>" % (self.card(), self.card(self.OTHER), self.card(), self.card(self.OTHER))
+        words = {self.URL: ["a1", "a2", "a3"], self.OTHER: ["b1", "b2"]}  # URL: 2 cards, 3 links
+        self.assertEqual([b.text for b in blocks(body, words)], ["b1 b2"])
+        words = {self.URL: ["a1", "a2"], self.OTHER: ["b1"]}  # OTHER: 2 cards, 1 link
+        self.assertEqual([b.text for b in blocks(body, words)], ["a1 a2"])
+
+    def test_a_mismatch_hides_cards_before_and_after_the_extra_one(self):
+        body = "<p>x %s</p><p>y %s</p><p>z %s</p>" % (self.card(), self.card(), self.card())
+        self.assertEqual([b.text for b in blocks(body, {self.URL: ["w1", "w2"]})], ["x", "y", "z"])
+
+    def test_matching_counts_across_blocks_and_appearances_still_show_in_order(self):
+        body = "<p>%s</p><p>%s</p>" % (self.card(), self.card(appearance="embed"))
+        self.assertEqual([b.text for b in blocks(body, {self.URL: ["one", "two"]})], ["one", "two"])
+
+    def test_cards_inside_a_hidden_macro_stay_out_of_the_count(self):
+        macro = '<ac:structured-macro ac:name="info"><ac:rich-text-body><p>%s</p></ac:rich-text-body></ac:structured-macro>' % self.card()
+        # one card on the page, one inside the macro: the file's two links do not match the one counted card
+        body = "%s<p>a %s</p>" % (macro, self.card())
+        self.assertEqual([b.text for b in blocks(body, {self.URL: ["w1", "w2"]})], ["a"])
+        # two cards on the page, one inside the macro: two links match the two counted cards
+        body = "%s<p>a %s b %s</p>" % (macro, self.card(), self.card())
+        self.assertEqual([b.text for b in blocks(body, {self.URL: ["w1", "w2"]})], ["a w1 b w2"])
+        # cards inside the macro alone do not make a mismatch for the file's links
+        body = "<p>a %s</p>%s" % (self.card(), macro)
+        self.assertEqual([b.text for b in blocks(body, {self.URL: ["w1"]})], ["a w1"])
+
+    def test_empty_card_tags_are_counted(self):
+        body = '<p>a <a data-card-appearance="inline" href="u"/> b <a href="u" data-card-appearance="inline">u</a></p>'
+        self.assertEqual([b.text for b in blocks(body, {"u": ["only words"]})], ["a b"])
+        self.assertEqual([b.text for b in blocks(body, {"u": ["w1", "w2"]})], ["a w1 b w2"])
 
     def test_none_map_is_byte_identical_to_the_old_result(self):
         body = ("<p>See %s and <a href=\"u\">link</a><br/>x</p><table><tr><td>%s</td><td>y</td></tr></table>"
