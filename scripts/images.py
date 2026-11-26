@@ -3,7 +3,9 @@ from __future__ import annotations
 
 import hashlib
 import html
+import math
 import os
+import re
 from typing import TYPE_CHECKING, Dict, List, Optional, Set, Tuple
 
 from storage import apply_edits, element_ranges, tokenize
@@ -19,8 +21,81 @@ MAX_WIDTH = 760
 _OTHER_PAGE_REFS = {"ri:page", "ri:blog-post", "ri:content-entity"}
 
 
+SVG_READ_BYTES = 65536
+_UTF8_BOM = b"\xef\xbb\xbf"
+_SVG_OPEN = re.compile(r"<svg(?=[\s/>])")
+# The rest of a start tag: any character, but a quoted value can hold a ">".
+_SVG_TAG = re.compile(r"""<svg(?=[\s/>])(?:[^>"']|"[^"]*"|'[^']*')*>""")
+_ATTRIBUTE = re.compile(r"""([^\s"'<>/=]+)\s*=\s*(?:"([^"]*)"|'([^']*)')""")
+_NUMBER = r"(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?"
+_LENGTH = re.compile(r"(%s)(px|in|cm|mm|Q|pt|pc)?" % _NUMBER)
+_VIEWBOX_NUMBER = re.compile(r"[+-]?" + _NUMBER)
+_PIXELS_PER_UNIT = {"": 1.0, "px": 1.0, "in": 96.0, "cm": 96 / 2.54, "mm": 96 / 25.4,
+                    "Q": 96 / 101.6, "pt": 96 / 72, "pc": 16.0}
+
+
+def _svg_root_tag(text: str) -> Optional[str]:
+    """The first <svg ...> start tag outside XML comments, or None."""
+    pos = 0
+    while True:
+        found = _SVG_OPEN.search(text, pos)
+        if not found:
+            return None
+        comment = text.find("<!--", pos, found.start())
+        if comment < 0:
+            tag = _SVG_TAG.match(text, found.start())
+            return tag.group(0) if tag else None
+        end = text.find("-->", comment + 4)
+        if end < 0:
+            return None
+        pos = end + 3
+
+
+def _svg_pixels(value: Optional[str]) -> Optional[float]:
+    """A width or height as pixels, or None when it has no value or a unit we can't convert."""
+    found = _LENGTH.fullmatch((value or "").strip())
+    return float(found.group(1)) * _PIXELS_PER_UNIT[found.group(2) or ""] if found else None
+
+
+def _svg_viewbox(value: Optional[str]) -> Optional[Tuple[float, float]]:
+    """The width and height of a viewBox of four numbers, or None."""
+    parts = re.split(r"[\s,]+", (value or "").strip())
+    if len(parts) != 4 or not all(_VIEWBOX_NUMBER.fullmatch(part) for part in parts):
+        return None
+    width, height = float(parts[2]), float(parts[3])
+    return (width, height) if width > 0 and height > 0 else None
+
+
+def _svg_size(data: bytes) -> Optional[Tuple[int, int]]:
+    """(width, height) in pixels from the start of an SVG file, or None."""
+    tag = _svg_root_tag(data.decode("utf-8", "replace"))
+    if tag is None:
+        return None
+    attrs: Dict[str, str] = {}
+    for found in _ATTRIBUTE.finditer(tag):
+        attrs.setdefault(found.group(1), found.group(2) if found.group(2) is not None else found.group(3))
+    width, height = _svg_pixels(attrs.get("width")), _svg_pixels(attrs.get("height"))
+    if width is None or height is None:
+        box = _svg_viewbox(attrs.get("viewBox"))
+        if box is None:
+            return None
+        if width is not None:
+            height = width * box[1] / box[0]
+        elif height is not None:
+            width = height * box[0] / box[1]
+        else:
+            width, height = box
+    if not (math.isfinite(width) and math.isfinite(height)):
+        return None
+    result = (round(width), round(height))
+    return result if result[0] > 0 and result[1] > 0 else None
+
+
 def image_size(path: str) -> Optional[Tuple[int, int]]:
-    """Return (width, height) of the image file, or None if it can't be read."""
+    """Return (width, height) of the image file, or None if it can't be read.
+
+    Reads PNG, GIF, JPEG and SVG. An SVG gets its size from the root tag's width and height
+    (px or absolute units) or its viewBox; a size in %, em or ex alone gives None."""
     try:
         with open(path, "rb") as f:
             head = f.read(26)
@@ -45,6 +120,11 @@ def image_size(path: str) -> Optional[Tuple[int, int]]:
                     if length < 2:  # a broken length would loop forever
                         return None
                     f.seek(length - 2, 1)
+            f.seek(0)
+            data = f.read(SVG_READ_BYTES)
+            start = data[len(_UTF8_BOM):] if data.startswith(_UTF8_BOM) else data
+            if path.lower().endswith(".svg") or start.lstrip().startswith((b"<?xml", b"<svg")):
+                return _svg_size(data)
     except OSError:
         return None
     return None
@@ -53,7 +133,7 @@ def image_size(path: str) -> Optional[Tuple[int, int]]:
 def embed_markup(alt: str, name: str, size: Optional[Tuple[int, int]]) -> str:
     """Return the storage markup that embeds attachment `name`."""
     attrs = 'ac:align="center" ac:layout="center"'
-    if size:
+    if size and size[0] > 0 and size[1] > 0:
         width, height = size
         attrs += (' ac:original-height="%d" ac:original-width="%d"'
                   ' ac:custom-width="true" ac:width="%d"' % (height, width, min(width, MAX_WIDTH)))
