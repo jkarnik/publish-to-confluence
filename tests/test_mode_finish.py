@@ -8,6 +8,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import helpers  # noqa: E402,F401  (puts scripts/ on sys.path)
 
 import cards  # noqa: E402
+import markers  # noqa: E402
 import mode_finish  # noqa: E402
 
 PAGE = "100"
@@ -393,6 +394,78 @@ class CardsAndCommentsTests(FinishCase):
                       ' data-card-appearance="block">https://example.com/guide</a>'
                       '</ac:inline-comment-marker>', body)
         self.assertEqual(body.count("ac:inline-comment-marker ac:ref"), 1)
+
+
+SPEC_ITEMS = [("Flow export spec", "draft, owner to be confirmed"),
+              ("Alert routing spec", "approved, owner to be confirmed"),
+              ("Device discovery spec", "draft, owner to be confirmed"),
+              ("Path analysis spec", "in review, owner to be confirmed")]
+
+
+def card(url):
+    return '<a href="%s" data-card-appearance="inline">%s</a>' % (url, url)
+
+
+class LinkWordsTests(FinishCase):
+    """Version `before` holds smart-link cards from the last publish; the update brought plain links."""
+
+    def spec_pages(self, marked, phrase):
+        old, new, md = [], [], []
+        for k, (title, note) in enumerate(SPEC_ITEMS):
+            url = "https://example.com/spec-%d" % k
+            text = note.replace(phrase, marker("r1", phrase), 1) if k == marked else note
+            old.append("<li>%s - %s</li>" % (card(url), text))
+            new.append('<li><a href="%s">%s</a> - %s</li>' % (url, title, note))
+            md.append("- [%s](%s) - %s" % (title, url, note))
+        wrap = "<p>Related specs:</p><ul>%s</ul><p>Next steps follow.</p>"
+        return wrap % "".join(old), wrap % "".join(new), "Related specs:\n\n" + "\n".join(md) + "\n\nNext steps follow.\n"
+
+    def test_look_alike_items_reattach_in_their_own_item(self):
+        before, current, md = self.spec_pages(2, "owner to be confirmed")
+        s = self.setup(current, md=md, before={3: before},
+                       comments=[comment("c1", "r1", "owner to be confirmed")])
+        out, code = s.run(before=3)
+        self.assertEqual(code, 0)
+        self.assertEqual(out["comments"]["reattached"], 1)
+        self.assertEqual(out["comments"]["moved"], [])
+        self.assertEqual(out["comments"]["detached"], [])
+        body = s.saved_body()
+        self.assertEqual(body.count("ac:inline-comment-marker ac:ref"), 1)
+        item = body[body.rindex("<li>", 0, body.index("<ac:inline-comment-marker")):]
+        self.assertTrue(item.startswith("<li>" + card("https://example.com/spec-2")))
+
+    def test_highlight_spanning_a_card_reattaches_whole(self):
+        url = "https://example.com/doc"
+        before = ("<p>Intro.</p><p>Read " + marker("r1", "the " + card(url) + " before the review")
+                  + " starts.</p>")
+        current = ('<p>Intro.</p><p>Read the <a href="%s">design doc</a> before the review starts.</p>' % url)
+        md = "Intro.\n\nRead the [design doc](%s) before the review starts.\n" % url
+        s = self.setup(current, md=md, before={3: before},
+                       comments=[comment("c1", "r1", "the design doc before the review")])
+        out, code = s.run(before=3)
+        self.assertEqual(code, 0)
+        self.assertEqual(out["comments"]["reattached"], 1)
+        self.assertEqual(out["comments"]["moved"], [])
+        self.assertEqual(out["comments"]["detached"], [])
+        anchor = markers.anchor_for(s.saved_body(), "r1", "", {url: ["design doc"]})
+        self.assertEqual(anchor.text, "the design doc before the review")
+
+    def test_nothing_wraps_inside_a_card_when_the_update_failed(self):
+        # The text update failed: the page body still holds the card. Its words are not text in the
+        # body `finish` wraps (that would shrink the highlight to "the "), even though the file has them.
+        url = "https://example.com/doc"
+        before = "<p>Read " + marker("r1", "the " + card(url)) + " now.</p>"
+        current = "<p>Read the %s now.</p>" % card(url)
+        md = "Read the [design doc](%s) now.\n" % url
+        s = self.setup(current, md=md, before={3: before}, comments=[comment("c1", "r1", "the design doc")])
+        out, code = s.run(before=3)
+        self.assertEqual(code, 0)
+        self.assertEqual(out["comments"]["reattached"], 0)
+        self.assertEqual(out["comments"]["moved"], [])
+        self.assertEqual(out["comments"]["detached"],
+                         [{"id": "c1", "text": "the design doc", "reason": "textGone"}])
+        self.assertNotIn("inline-comment-marker", s.client.pages[PAGE]["body"]["storage"]["value"])
+        self.assertEqual(s.client.saves, [])
 
 
 class ExitCodeTests(FinishCase):
