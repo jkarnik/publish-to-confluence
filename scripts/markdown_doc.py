@@ -310,7 +310,7 @@ def web_links(md: str) -> List[LinkRef]:
 
 _PUA = 0xE000  # escaped characters are parked at U+E000 + their code while other syntax is stripped
 _HOLD = re.compile(r"\x00(\d+)\x00")
-_ESCAPE_PARKED = re.compile("[-]")
+_ESCAPE_PARKED = re.compile("[\ue000-\ue07f]")
 _HTML_COMMENT = re.compile(r"<!--.*?-->", re.DOTALL)
 _HTML_BREAK = re.compile(r"<br\s*/?>", re.IGNORECASE)
 _HTML_TAG = re.compile(r"</?[A-Za-z][^<>]*>")
