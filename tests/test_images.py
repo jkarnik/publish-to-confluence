@@ -65,6 +65,137 @@ class ImageSizeTests(unittest.TestCase):
                 self.assertIsNone(images.image_size(path), path)
 
 
+def svg(directory, text, name="a.svg"):
+    """Write SVG text (a str) to a file in directory and return its path."""
+    return write(directory, name, text.encode("utf-8"))
+
+
+class SvgSizeTests(unittest.TestCase):
+    def test_image_size_svg_width_height(self):
+        with helpers.TempDir() as tmp:
+            plain = svg(tmp, '<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="600"></svg>')
+            rounded = svg(tmp, '<svg width="99.6px" height="10.4px"></svg>', "b.svg")
+            single = svg(tmp, "<svg width='300' height='150'></svg>", "c.svg")
+            self.assertEqual(images.image_size(plain), (1200, 600))
+            self.assertEqual(images.image_size(rounded), (100, 10))
+            self.assertEqual(images.image_size(single), (300, 150))
+
+    def test_image_size_svg_width_is_not_read_from_other_attributes(self):
+        with helpers.TempDir() as tmp:
+            both = svg(tmp, '<svg stroke-width="5" width="300" height="150"></svg>')
+            # stroke-width is not the width, so only the height counts and the viewBox scales to it.
+            height_only = svg(tmp, '<svg stroke-width="5" height="150" viewBox="0 0 400 200"></svg>', "b.svg")
+            no_width = svg(tmp, '<svg stroke-width="5" height="150"></svg>', "c.svg")
+            in_a_value = svg(tmp, "<svg data-note='x width=\"5\" height=\"5\"' width=\"300\" height=\"150\"></svg>",
+                             "d.svg")
+            self.assertEqual(images.image_size(both), (300, 150))
+            self.assertEqual(images.image_size(height_only), (300, 150))
+            self.assertIsNone(images.image_size(no_width))
+            self.assertEqual(images.image_size(in_a_value), (300, 150))
+
+    def test_image_size_svg_absolute_units(self):
+        cases = [
+            ('width="210mm" height="297mm"', (794, 1123)),
+            ('width="2in" height="1in"', (192, 96)),
+            ('width="2.54cm" height="1cm"', (96, 38)),
+            ('width="72pt" height="36pt"', (96, 48)),
+            ('width="10pc" height="5pc"', (160, 80)),
+            ('width="101.6Q" height="50.8Q"', (96, 48)),
+            ('width="1.2e3" height="6E2px"', (1200, 600)),
+            ('width=" 40 " height=".5in"', (40, 48)),
+        ]
+        with helpers.TempDir() as tmp:
+            for attrs, expected in cases:
+                path = svg(tmp, "<svg %s></svg>" % attrs)
+                self.assertEqual(images.image_size(path), expected, attrs)
+
+    def test_image_size_svg_viewbox(self):
+        prolog = ('<?xml version="1.0" encoding="UTF-8"?>\n'
+                  '<!-- <svg width="1" height="1"> -->\n'
+                  '<!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN" '
+                  '"http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd">\n'
+                  '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 500 250"></svg>')
+        split = ('<svg\n   xmlns="http://www.w3.org/2000/svg"\n   width="100%"\n'
+                 '   viewBox="0 0 640 320"\n>\n</svg>')
+        cases = [
+            ("a.svg", '<svg width="100%" height="100%" viewBox="0 0 1200 600"></svg>', (1200, 600)),
+            ("b.svg", '<svg viewBox="0,0,400,200"></svg>', (400, 200)),
+            ("c.svg", '<svg viewBox=" 0, 0 ,99.6 50.2 "></svg>', (100, 50)),
+            ("d.svg", prolog, (500, 250)),
+            ("e.svg", split, (640, 320)),
+            ("f.svg", '<svg width="50%" height="10em" viewBox="0 0 400 200"></svg>', (400, 200)),
+            ("g.svg", '<svg width="3ex" height="1vw" viewBox="-20 -10 400 200"></svg>', (400, 200)),
+            ("h.svg", '<svg data-x="a>b" viewBox="0 0 30 20"></svg>', (30, 20)),
+            # Not named .svg: the first non-blank text decides.
+            ("i.txt", '<svg width="100%" viewBox="0 0 80 40"></svg>', (80, 40)),
+            ("j.dat", '\n\n  <?xml version="1.0"?><svg viewBox="0 0 80 40"></svg>', (80, 40)),
+            ("k", '<svg>\n</svg>\n', None),
+            ("l.SVG", 'not xml first\n<svg viewBox="0 0 70 35"></svg>', (70, 35)),
+        ]
+        with helpers.TempDir() as tmp:
+            for name, text, expected in cases:
+                self.assertEqual(images.image_size(svg(tmp, text, name)), expected, name)
+            bom = write(tmp, "m.dat", b'\xef\xbb\xbf\n<svg viewBox="0 0 90 45"></svg>')
+            self.assertEqual(images.image_size(bom), (90, 45))
+
+    def test_image_size_svg_one_dimension(self):
+        cases = [
+            ('width="800" viewBox="0 0 400 200"', (800, 400)),
+            ('height="100" viewBox="0 0 400 200"', (200, 100)),
+            ('width="50%" height="300" viewBox="0 0 400 200"', (600, 300)),
+            ('width="4in" height="2em" viewBox="0 0 300 100"', (384, 128)),
+            ('width="800" viewBox="10 20 400 200"', (800, 400)),
+            ('width="800"', None),
+            ('height="800"', None),
+            ('width="800" viewBox="0 0 0 0"', None),
+            ('width="1" viewBox="0 0 1000 1"', None),  # the height rounds to 0
+        ]
+        with helpers.TempDir() as tmp:
+            for attrs, expected in cases:
+                path = svg(tmp, "<svg %s></svg>" % attrs)
+                self.assertEqual(images.image_size(path), expected, attrs)
+
+    def test_image_size_svg_unknown(self):
+        cases = [
+            "<svg></svg>",
+            '<svg xmlns="http://www.w3.org/2000/svg"></svg>',
+            '<svg viewBox="0 0 0 0"></svg>',
+            '<svg viewBox="0 0 100 0"></svg>',
+            '<svg viewBox="0 0 -5 10"></svg>',
+            '<svg viewBox="0 0 100"></svg>',
+            '<svg viewBox="0 0 100 50 7"></svg>',
+            '<svg viewBox="0 0 wide high"></svg>',
+            '<svg viewBox="0 0 nan inf"></svg>',
+            '<svg viewBox=""></svg>',
+            '<svg width="0" height="0"></svg>',
+            '<svg width="-5" height="10"></svg>',
+            '<svg width="1e999" height="10"></svg>',
+            '<svg width="50%" height="50%"></svg>',
+            "plain text, not an svg at all",
+            "",
+            '<svg width="10" height="10"',  # the tag never closes
+            '<!-- <svg width="10" height="10"></svg>',  # the comment never closes
+            "<html><body>hello</body></html>",
+        ]
+        with helpers.TempDir() as tmp:
+            for text in cases:
+                self.assertIsNone(images.image_size(svg(tmp, text)), text)
+            self.assertIsNone(images.image_size(os.path.join(tmp, "gone.svg")))
+            self.assertIsNone(images.image_size(tmp))  # a folder, not a file
+
+    def test_image_size_svg_reads_only_the_first_64k(self):
+        late = '<!-- %s -->\n<svg width="10" height="10"></svg>' % ("x" * 70000)
+        early = '<!-- %s -->\n<svg width="10" height="10"></svg>' % ("x" * 60000)
+        with helpers.TempDir() as tmp:
+            self.assertIsNone(images.image_size(svg(tmp, late)))
+            self.assertEqual(images.image_size(svg(tmp, early, "b.svg")), (10, 10))
+
+    def test_image_size_png_wins_over_an_svg_name(self):
+        with helpers.TempDir() as tmp:
+            path = write(tmp, "a.svg", helpers.tiny_png(3, 2))
+            self.assertEqual(images.image_size(path), (3, 2))
+
+
 class EmbedMarkupTests(unittest.TestCase):
     def attrs(self, markup):
         tokens = tokenize(markup)
@@ -92,6 +223,19 @@ class EmbedMarkupTests(unittest.TestCase):
         self.assertEqual(image["ac:align"], "center")
         for key in ("ac:width", "ac:custom-width", "ac:original-width", "ac:original-height"):
             self.assertNotIn(key, image)
+
+    def test_embed_markup_svg_capped(self):
+        image, _ = self.attrs(images.embed_markup("Diagram", "a.svg", (1200, 600)))
+        self.assertEqual(image["ac:width"], "760")
+        self.assertEqual(image["ac:original-width"], "1200")
+        self.assertEqual(image["ac:original-height"], "600")
+
+    def test_embed_markup_zero_size(self):
+        for size in ((0, 0), (0, 5), (5, 0), (-1, 5), (5, -1)):
+            image, _ = self.attrs(images.embed_markup("Alt", "a.svg", size))
+            self.assertEqual(image["ac:align"], "center", size)
+            for key in ("ac:width", "ac:custom-width", "ac:original-width", "ac:original-height"):
+                self.assertNotIn(key, image, size)
 
     def test_embed_markup_escapes_alt_and_filename(self):
         markup = images.embed_markup('A "quoted" <b> & more', 'my "pic" & <x>.png', (10, 10))
