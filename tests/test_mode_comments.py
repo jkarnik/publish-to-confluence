@@ -191,6 +191,54 @@ class OpenCommentTests(unittest.TestCase):
         self.assertEqual(out["willDetach"], sum(1 for s in statuses.values() if s == "willDetach"))
 
 
+ITEMS = ("uplink", "downlink", "backup")
+
+
+def item_body(commented=None, highlight="packet loss on the {name} interface"):
+    """The page's list of three look-alike alerts; `commented` names the item whose `highlight` holds marker R1."""
+    items = []
+    for name in ITEMS:
+        text = "Alert when packet loss on the %s interface exceeds 5%%." % name
+        if name == commented:
+            text = text.replace(highlight.format(name=name), marker("R1", highlight.format(name=name)))
+        items.append("<li>" + text + "</li>")
+    return "<h2>Alerting requirements</h2><ul>" + "".join(items) + "</ul><p>Out of scope for now.</p>"
+
+
+def item_markdown(gone=None):
+    lines = ["- Alert when packet loss on the %s interface exceeds 5%%." % name
+             for name in ITEMS if name != gone]
+    return "# Test page\n\n## Alerting requirements\n\n" + "\n".join(lines) + "\n\nOut of scope for now.\n"
+
+
+class SiblingTests(unittest.TestCase):
+    def test_deleted_list_item_will_detach(self):
+        for gone in ITEMS:
+            selection = "packet loss on the %s interface" % gone
+            out, code = run([comment("c1", ref="R1", selection=selection)],
+                            page_body=item_body(commented=gone), markdown=item_markdown(gone=gone))
+            self.assertEqual(code, 0, gone)
+            self.assertEqual(out["open"], [{"id": "c1", "text": selection, "status": "willDetach",
+                                            "reason": "textGone", "to": None}], gone)
+            self.assertEqual(out["willDetach"], 1, gone)
+
+    def test_resolved_comment_in_a_deleted_list_item_is_not_found(self):
+        # "interface exceeds 5%" is in every item, so once its own item is gone the resolved
+        # comment must not re-attach to a sibling.
+        for gone in ITEMS:
+            out, _ = run([comment("r1", status="resolved", ref="R1", selection="interface exceeds 5%")],
+                         page_body=item_body(commented=gone, highlight="interface exceeds 5%"),
+                         markdown=item_markdown(gone=gone))
+            self.assertEqual(out["resolved"], [{"id": "r1", "text": "interface exceeds 5%", "status": "notFound"}], gone)
+
+    def test_untouched_list_keeps_every_comment_in_its_own_item(self):
+        for name in ITEMS:
+            selection = "packet loss on the %s interface" % name
+            out, _ = run([comment("c1", ref="R1", selection=selection)],
+                         page_body=item_body(commented=name), markdown=item_markdown())
+            self.assertEqual(out["open"][0]["status"], "willReattach", name)
+
+
 class ResolvedCommentTests(unittest.TestCase):
     def test_resolved_listed_separately(self):
         md = MARKDOWN.replace("five attempts", "a handful of tries")

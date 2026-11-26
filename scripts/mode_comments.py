@@ -3,9 +3,10 @@ from __future__ import annotations
 
 from typing import Dict, List, Optional, Tuple
 
+import visible_text
 from markdown_doc import visible_blocks
 from markers import anchor_for, refs
-from matcher import Anchor, find
+from matcher import Anchor, align, find
 from textnorm import normalize
 
 OPEN_STATUSES = ("open", "reopened", "dangling")
@@ -32,13 +33,14 @@ def _anchor(comment: Dict, body: str, present: set) -> Tuple[Optional[Anchor], b
     return None, False
 
 
-def _open_entry(comment: Dict, body: str, present: set, texts: List[str]) -> Dict:
+def _open_entry(comment: Dict, body: str, present: set, texts: List[str],
+                old_texts: List[str], alignment: List[Optional[int]]) -> Dict:
     anchor, had_marker = _anchor(comment, body, present)
     entry = {"id": comment.get("id"), "text": anchor.text if anchor else "",
              "status": "staysDetached", "reason": None, "to": None}
     if anchor is None:
         return entry
-    result = find(anchor, texts, had_marker)
+    result = find(anchor, texts, had_marker, old_texts, alignment)
     if result.status == "exact":
         entry["status"] = "willReattach"
     elif result.status == "moved":
@@ -50,9 +52,10 @@ def _open_entry(comment: Dict, body: str, present: set, texts: List[str]) -> Dic
     return entry
 
 
-def _resolved_entry(comment: Dict, body: str, present: set, texts: List[str]) -> Dict:
+def _resolved_entry(comment: Dict, body: str, present: set, texts: List[str],
+                    old_texts: List[str], alignment: List[Optional[int]]) -> Dict:
     anchor, _ = _anchor(comment, body, present)
-    exact = anchor is not None and find(anchor, texts, False).status == "exact"
+    exact = anchor is not None and find(anchor, texts, False, old_texts, alignment).status == "exact"
     return {"id": comment.get("id"), "text": anchor.text if anchor else "",
             "status": "willReattach" if exact else "notFound"}
 
@@ -75,15 +78,17 @@ def run(page_id: str, md_path: str, client) -> Tuple[Dict, int]:
     body = (((page.get("body") or {}).get("storage") or {}).get("value")) or ""
     present = refs(body)
     texts = [block.text for block in visible_blocks(md)]
+    old_texts = [block.text for block in visible_text.blocks(body)]  # the blocks anchor_for numbers
+    alignment = align(old_texts, texts)
 
     open_entries: List[Dict] = []
     resolved_entries: List[Dict] = []
     for comment in comments:
         state = comment.get("status")
         if state in OPEN_STATUSES:
-            open_entries.append(_open_entry(comment, body, present, texts))
+            open_entries.append(_open_entry(comment, body, present, texts, old_texts, alignment))
         elif state == "resolved":
-            resolved_entries.append(_resolved_entry(comment, body, present, texts))
+            resolved_entries.append(_resolved_entry(comment, body, present, texts, old_texts, alignment))
     will_detach = sum(1 for entry in open_entries if entry["status"] == "willDetach")
     return {"pageId": page_id, "open": open_entries, "resolved": resolved_entries,
             "willDetach": will_detach}, 0
